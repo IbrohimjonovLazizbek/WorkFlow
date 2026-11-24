@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>TaskFlow — Daily Task Manager &amp; Progress Tracker</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%234f46e5'/%3E%3Cstop offset='100%25' stop-color='%236366f1'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M9.5 16.5l4.2 4.2L22.5 11.5' fill='none' stroke='%23ffffff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <script>
+    (function () {
+      try {
+        var raw = localStorage.getItem('taskflow_state_v1');
+        if (raw) {
+          var parsed = JSON.parse(raw);
+          if (parsed && (parsed.theme === 'dark' || parsed.theme === 'light')) {
+            document.documentElement.setAttribute('data-theme', parsed.theme);
+          }
+        }
+      } catch (e) {
+        /* ignore storage read issues on early theme init */
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/analytics.css">
+</head>
+<body>
+  <div class="app-shell">
+    <div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
+
+    <aside id="app-sidebar" class="sidebar" aria-label="Primary Navigation">
+      <div class="brand">
+        <div class="brand-logo" aria-hidden="true">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <rect width="24" height="24" rx="7" fill="currentColor"></rect>
+            <path d="M7.2 12.4L10.4 15.6L16.8 8.8" stroke="#ffffff" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"></path>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">TaskFlow</span>
+          <span id="sidebar-workspace-name" class="brand-subtitle">Daily Workspace</span>
+        </div>
+        <button id="btn-sidebar-close" class="btn btn-ghost btn-icon sidebar-close-btn" type="button" aria-label="Close navigation">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <nav class="nav-list" aria-label="Views">
+        <button class="nav-item active" type="button" data-view="today" aria-current="page">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="18" rx="3"></rect>
+            <line x1="16" y1="2" x2="16" y2="6"></line>
+            <line x1="8" y1="2" x2="8" y2="6"></line>
+            <line x1="3" y1="10" x2="21" y2="10"></line>
+            <path d="M9 15l2 2 4-4"></path>
+          </svg>
+          <span class="nav-label">Today</span>
+          <span id="nav-badge-today" class="nav-badge">0</span>
+        </button>
+
+        <button class="nav-item" type="button" data-view="upcoming">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="18" rx="3"></rect>
+            <line x1="16" y1="2" x2="16" y2="6"></line>
+            <line x1="8" y1="2" x2="8" y2="6"></line>
+            <line x1="3" y1="10" x2="21" y2="10"></line>
+            <line x1="8" y1="15" x2="16" y2="15"></line>
+          </svg>
+          <span class="nav-label">Upcoming</span>
+          <span id="nav-badge-upcoming" class="nav-badge">0</span>
+        </button>
+
+        <button class="nav-item" type="button" data-view="analytics">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="20" x2="18" y2="10"></line>
+            <line x1="12" y1="20" x2="12" y2="4"></line>
+            <line x1="6" y1="20" x2="6" y2="14"></line>
+          </svg>
+          <span class="nav-label">Analytics</span>
+          <span id="nav-badge-analytics" class="nav-badge">0%</span>
+        </button>
+
+        <button class="nav-item" type="button" data-view="routines">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <polyline points="1 20 1 14 7 14"></polyline>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+          </svg>
+          <span class="nav-label">Routines</span>
+          <span id="nav-badge-routines" class="nav-badge">0</span>
+        </button>
+      </nav>
+
+      <div id="sidebar-mini-progress" class="sidebar-mini-progress"></div>
+
+      <div id="sidebar-categories" class="sidebar-categories"></div>
+
+      <div class="sidebar-footer">
+        <button id="btn-open-settings" class="btn btn-ghost sidebar-footer-btn" type="button">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+          <span>Settings</span>
+        </button>
+        <button id="btn-open-shortcuts" class="btn btn-ghost sidebar-footer-btn" type="button">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2" y="6" width="20" height="12" rx="2"></rect>
+            <line x1="6" y1="10" x2="6.01" y2="10"></line>
+            <line x1="10" y1="10" x2="10.01" y2="10"></line>
+            <line x1="14" y1="10" x2="14.01" y2="10"></line>
+            <line x1="18" y1="10" x2="18.01" y2="10"></line>
+            <line x1="8" y1="14" x2="16" y2="14"></line>
+          </svg>
+          <span>Shortcuts</span>
+          <kbd class="kbd">?</kbd>
+        </button>
+      </div>
+    </aside>
+
+    <div class="main-wrapper">
+      <header id="app-header" class="top-header">
+        <div class="header-left">
+          <button id="btn-mobile-menu" class="btn btn-ghost btn-icon mobile-menu-btn" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="app-sidebar">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="3" y1="6" x2="21" y2="6"></line>
+              <line x1="3" y1="12" x2="21" y2="12"></line>
+              <line x1="3" y1="18" x2="21" y2="18"></line>
+            </svg>
+          </button>
+          <div class="header-titles">
+            <h1 id="header-title">Today</h1>
+            <p id="header-subtitle">Plan your day and track momentum</p>
+          </div>
+        </div>
+
+        <div class="header-right">
+          <div class="header-search">
+            <svg class="header-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input id="global-search-input" class="header-search-input" type="search" placeholder="Search tasks... (/)" aria-label="Search tasks" autocomplete="off">
+          </div>
+
+          <div id="header-timer-widget" class="header-timer-widget" aria-label="Focus Timer"></div>
+
+          <button id="btn-command-palette" class="btn btn-secondary btn-sm header-cmd-btn" type="button" title="Command Palette (Ctrl/Cmd+K)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="4 17 10 11 4 5"></polyline>
+              <line x1="12" y1="19" x2="20" y2="19"></line>
+            </svg>
+            <span class="cmd-label">Commands</span>
+            <kbd class="kbd">Ctrl+K</kbd>
+          </button>
+
+          <button id="btn-theme-toggle" class="btn btn-ghost btn-icon" type="button" aria-label="Toggle dark mode" title="Toggle color theme (D)">
+            <svg class="theme-icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="5"></circle>
+              <line x1="12" y1="1" x2="12" y2="3"></line>
+              <line x1="12" y1="21" x2="12" y2="23"></line>
+              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+              <line x1="1" y1="12" x2="3" y2="12"></line>
+              <line x1="21" y1="12" x2="23" y2="12"></line>
+              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+            </svg>
+          </button>
+
+          <button id="btn-focus-quick-add" class="btn btn-primary btn-sm" type="button" title="Add new task (N)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            <span>New Task</span>
+          </button>
+        </div>
+      </header>
+
+      <main id="main-content" class="main-content">
+        <div id="sample-data-banner" class="sample-banner" hidden>
+          <div class="sample-banner-text">
+            <span class="sample-banner-badge">Demo Workspace</span>
+            <span>Sample tasks, routines, and 14-day progress history are loaded so you can explore immediately.</span>
+          </div>
+          <div class="sample-banner-actions">
+            <button id="btn-clear-sample-banner" class="btn btn-secondary btn-sm" type="button">Start Fresh</button>
+            <button id="btn-dismiss-sample-banner" class="btn btn-ghost btn-sm" type="button" aria-label="Dismiss sample data notice">Dismiss</button>
+          </div>
+        </div>
+
+        <section id="view-today" class="view-panel" data-view-panel="today">
+          <div id="today-date-strip"></div>
+          <div id="today-progress-banner"></div>
+          <div id="rollover-banner"></div>
+          <div id="quick-add-container"></div>
+          <div id="task-filters-container"></div>
+          <div id="task-list-container"></div>
+          <div id="daily-checkin-container"></div>
+        </section>
+
+        <section id="view-upcoming" class="view-panel" data-view-panel="upcoming" hidden></section>
+        <section id="view-analytics" class="view-panel" data-view-panel="analytics" hidden></section>
+        <section id="view-routines" class="view-panel" data-view-panel="routines" hidden></section>
+      </main>
+    </div>
+  </div>
+
+  <!-- Task Detail Slide-over Drawer -->
+  <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+  <aside id="task-drawer" class="drawer" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Task Details">
+    <div id="task-drawer-body" class="drawer-inner"></div>
+  </aside>
+
+  <!-- Command Palette Modal -->
+  <div id="command-palette-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-label="Command Palette">
+    <div class="modal-dialog command-palette">
+      <div class="command-header">
+        <svg class="command-search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        <input id="command-palette-input" class="command-input" type="text" placeholder="Type a command or search tasks..." autocomplete="off" aria-label="Command search">
+        <kbd class="kbd">Esc</kbd>
+      </div>
+      <div id="command-palette-list" class="command-list" role="listbox"></div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+    <div class="modal-dialog settings-dialog">
+      <div class="modal-header">
+        <h2 id="settings-modal-title" class="modal-title">Workspace Settings</h2>
+        <button class="btn btn-ghost btn-icon modal-close-btn" type="button" data-close-modal="settings-modal" aria-label="Close settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form id="settings-form" class="settings-form">
+          <div class="form-group">
+            <label class="form-label" for="setting-user-name">Workspace Name</label>
+            <input id="setting-user-name" class="form-input" type="text" maxlength="40" placeholder="Daily Workspace">
+          </div>
+
+          <div class="settings-grid-two">
+            <div class="form-group">
+              <label class="form-label" for="setting-goal-tasks">Daily Task Goal</label>
+              <input id="setting-goal-tasks" class="form-input" type="number" min="1" max="50" step="1">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="setting-goal-minutes">Daily Focus Goal (mins)</label>
+              <input id="setting-goal-minutes" class="form-input" type="number" min="15" max="720" step="15">
+            </div>
+          </div>
+
+          <div class="settings-toggles">
+            <label class="setting-toggle-row" for="setting-sound-enabled">
+              <div>
+                <span class="setting-toggle-title">Sound Chimes</span>
+                <span class="setting-toggle-desc">Gentle Web Audio feedback on task completion and timer end</span>
+              </div>
+              <input id="setting-sound-enabled" class="toggle-switch" type="checkbox">
+            </label>
+
+            <label class="setting-toggle-row" for="setting-show-completed">
+              <div>
+                <span class="setting-toggle-title">Show Completed Tasks</span>
+                <span class="setting-toggle-desc">Keep finished tasks visible in Today's All view</span>
+              </div>
+              <input id="setting-show-completed" class="toggle-switch" type="checkbox">
+            </label>
+          </div>
+        </form>
+
+        <div class="settings-divider"></div>
+
+        <div class="settings-data-section">
+          <h3 class="settings-section-title">Backup &amp; Data</h3>
+          <div class="settings-data-actions">
+            <button id="btn-export-json" class="btn btn-secondary btn-sm" type="button">Export JSON</button>
+            <button id="btn-export-csv" class="btn btn-secondary btn-sm" type="button">Export CSV</button>
+            <button id="btn-import-json" class="btn btn-secondary btn-sm" type="button">Import JSON</button>
+            <input id="import-json-file" type="file" accept=".json,application/json" hidden>
+          </div>
+
+          <div class="settings-danger-actions">
+            <button id="btn-clear-sample-data" class="btn btn-danger btn-sm" type="button">Clear All / Start Fresh</button>
+            <button id="btn-reset-demo-data" class="btn btn-ghost btn-sm" type="button">Restore Demo Data</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary btn-sm" type="button" data-close-modal="settings-modal">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Keyboard Shortcuts Modal -->
+  <div id="shortcuts-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="shortcuts-modal-title">
+    <div class="modal-dialog shortcuts-dialog">
+      <div class="modal-header">
+        <h2 id="shortcuts-modal-title" class="modal-title">Keyboard Shortcuts</h2>
+        <button class="btn btn-ghost btn-icon modal-close-btn" type="button" data-close-modal="shortcuts-modal" aria-label="Close shortcuts">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="shortcut-grid">
+          <div class="shortcut-row"><span>Command Palette</span><span class="shortcut-keys"><kbd class="kbd">Ctrl</kbd> + <kbd class="kbd">K</kbd></span></div>
+          <div class="shortcut-row"><span>New Task (Quick Add)</span><span class="shortcut-keys"><kbd class="kbd">N</kbd></span></div>
+          <div class="shortcut-row"><span>Search Tasks</span><span class="shortcut-keys"><kbd class="kbd">/</kbd></span></div>
+          <div class="shortcut-row"><span>Jump to Today</span><span class="shortcut-keys"><kbd class="kbd">T</kbd></span></div>
+          <div class="shortcut-row"><span>Toggle Light / Dark Theme</span><span class="shortcut-keys"><kbd class="kbd">D</kbd></span></div>
+          <div class="shortcut-row"><span>Start / Pause Focus Timer</span><span class="shortcut-keys"><kbd class="kbd">F</kbd></span></div>
+          <div class="shortcut-row"><span>Switch Views</span><span class="shortcut-keys"><kbd class="kbd">1</kbd> – <kbd class="kbd">4</kbd></span></div>
+          <div class="shortcut-row"><span>Undo Last Action</span><span class="shortcut-keys"><kbd class="kbd">Ctrl</kbd> + <kbd class="kbd">Z</kbd></span></div>
+          <div class="shortcut-row"><span>Show Shortcuts</span><span class="shortcut-keys"><kbd class="kbd">?</kbd></span></div>
+          <div class="shortcut-row"><span>Close Modal / Drawer</span><span class="shortcut-keys"><kbd class="kbd">Esc</kbd></span></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" type="button" data-close-modal="shortcuts-modal">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toasts & Screen Reader Live Region -->
+  <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
+  <div id="sr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="js/state.js"></script>
+  <script src="js/timer.js"></script>
+  <script src="js/tasks-ui.js"></script>
+  <script src="js/routines-ui.js"></script>
+  <script src="js/analytics-ui.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

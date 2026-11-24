@@ -1,0 +1,296 @@
+/* ==========================================================================
+   TaskFlow Design System — Tokens & Themes
+   ========================================================================== */
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --text-2xs: 0.6875rem; /* 11px */
+  --text-xs: 0.75rem;    /* 12px */
+  --text-sm: 0.8125rem;  /* 13px */
+  --text-base: 0.875rem; /* 14px */
+  --text-md: 0.9375rem;  /* 15px */
+  --text-lg: 1.0625rem;  /* 17px */
+  --text-xl: 1.25rem;    /* 20px */
+  --text-2xl: 1.5rem;    /* 24px */
+  --text-3xl: 1.75rem;   /* 28px */
+
+  --leading-none: 1;
+  --leading-tight: 1.25;
+  --leading-snug: 1.38;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.62;
+
+  --tracking-tight: -0.025em;
+  --tracking-snug: -0.012em;
+  --tracking-wide: 0.05em;
+
+  /* Spacing Scale */
+  --space-0: 0px;
+  --space-1: 4px;
+  --space-1-5: 6px;
+  --space-2: 8px;
+  --space-2-5: 10px;
+  --space-3: 12px;
+  --space-3-5: 14px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Radii */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-full: 9999px;
+
+  /* Shell Dimensions */
+  --sidebar-width: 260px;
+  --header-height: 64px;
+  --drawer-width: 440px;
+  --content-max-width: 1120px;
+
+  /* Z-Index Scale */
+  --z-base: 1;
+  --z-sticky: 20;
+  --z-header: 30;
+  --z-sidebar: 40;
+  --z-backdrop: 50;
+  --z-drawer: 60;
+  --z-modal: 70;
+  --z-toast: 80;
+  --z-tooltip: 90;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 140ms;
+  --duration-base: 220ms;
+  --duration-slow: 340ms;
+
+  /* Surfaces — Alabaster Light */
+  --bg-canvas: #f6f8fb;
+  --bg-surface: #ffffff;
+  --bg-surface-subtle: #f1f5f9;
+  --bg-surface-hover: #f8fafc;
+  --bg-surface-active: #eef2ff;
+  --bg-header: rgba(246, 248, 251, 0.85);
+  --bg-sidebar: #fcfdff;
+  --bg-input: #ffffff;
+  --bg-kbd: #f1f5f9;
+  --bg-overlay: rgba(15, 23, 42, 0.38);
+
+  /* Hairline Borders */
+  --border-subtle: #e2e8f0;
+  --border-default: #cbd5e1;
+  --border-strong: #94a3b8;
+  --border-focus: #4f46e5;
+
+  /* Ink */
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+  --text-on-accent: #ffffff;
+
+  /* Primary Accent — Indigo / Cobalt */
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-active: #3730a3;
+  --accent-soft: #eef2ff;
+  --accent-soft-hover: #e0e7ff;
+  --accent-text: #4338ca;
+  --accent-border: rgba(79, 70, 229, 0.25);
+  --accent-glow: rgba(79, 70, 229, 0.16);
+
+  /* Semantic — Emerald, Amber, Rose, Sky */
+  --success: #10b981;
+  --success-hover: #059669;
+  --success-soft: #ecfdf5;
+  --success-text: #047857;
+  --success-border: rgba(16, 185, 129, 0.28);
+
+  --warning: #f59e0b;
+  --warning-hover: #d97706;
+  --warning-soft: #fffbeb;
+  --warning-text: #b45309;
+  --warning-border: rgba(245, 158, 11, 0.32);
+
+  --danger: #ef4444;
+  --danger-hover: #dc2626;
+  --danger-soft: #fef2f2;
+  --danger-text: #b91c1c;
+  --danger-border: rgba(239, 68, 68, 0.28);
+
+  --info: #0ea5e9;
+  --info-soft: #f0f9ff;
+  --info-text: #0369a1;
+  --info-border: rgba(14, 165, 233, 0.28);
+
+  /* Category Palette (aligned with TaskFlow.Utils.CATEGORY_META) */
+  --cat-work: #4f46e5;
+  --cat-work-soft: #eef2ff;
+  --cat-work-text: #4338ca;
+
+  --cat-health: #10b981;
+  --cat-health-soft: #ecfdf5;
+  --cat-health-text: #047857;
+
+  --cat-learning: #0ea5e9;
+  --cat-learning-soft: #f0f9ff;
+  --cat-learning-text: #0369a1;
+
+  --cat-personal: #f59e0b;
+  --cat-personal-soft: #fffbeb;
+  --cat-personal-text: #b45309;
+
+  --cat-admin: #8b5cf6;
+  --cat-admin-soft: #f5f3ff;
+  --cat-admin-text: #6d28d9;
+
+  /* Heatmap Consistency Scale */
+  --heat-0: #eef2f6;
+  --heat-1: #c7d2fe;
+  --heat-2: #818cf8;
+  --heat-3: #4f46e5;
+  --heat-4: #312e81;
+
+  /* Chart Surfaces */
+  --chart-grid: rgba(148, 163, 184, 0.22);
+  --chart-track: #e2e8f0;
+  --chart-planned: #cbd5e1;
+  --chart-tooltip-bg: #0f172a;
+  --chart-tooltip-text: #f8fafc;
+
+  /* Soft Layered Shadows */
+  --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.05), 0 1px 2px rgba(15, 23, 42, 0.03);
+  --shadow-md: 0 4px 12px -2px rgba(15, 23, 42, 0.06), 0 2px 6px -1px rgba(15, 23, 42, 0.04);
+  --shadow-lg: 0 14px 32px -6px rgba(15, 23, 42, 0.10), 0 4px 12px -2px rgba(15, 23, 42, 0.05);
+  --shadow-xl: 0 24px 48px -12px rgba(15, 23, 42, 0.18), 0 8px 20px -4px rgba(15, 23, 42, 0.08);
+  --shadow-ring: 0 0 0 3px var(--accent-glow);
+
+  /* Scrollbars */
+  --scrollbar-thumb: rgba(100, 116, 139, 0.28);
+  --scrollbar-thumb-hover: rgba(100, 116, 139, 0.48);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Surfaces — Deep Obsidian */
+  --bg-canvas: #0b0e14;
+  --bg-surface: #121721;
+  --bg-surface-subtle: #181f2c;
+  --bg-surface-hover: #1d2536;
+  --bg-surface-active: rgba(99, 102, 241, 0.16);
+  --bg-header: rgba(11, 14, 20, 0.84);
+  --bg-sidebar: #0e131c;
+  --bg-input: #141a26;
+  --bg-kbd: #1e2636;
+  --bg-overlay: rgba(2, 6, 14, 0.72);
+
+  /* Hairline Borders */
+  --border-subtle: #242e42;
+  --border-default: #2e3b54;
+  --border-strong: #475569;
+  --border-focus: #818cf8;
+
+  /* Ink */
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-faint: #475569;
+  --text-on-accent: #ffffff;
+
+  /* Primary Accent — Vibrant Indigo */
+  --accent: #6366f1;
+  --accent-hover: #818cf8;
+  --accent-active: #4f46e5;
+  --accent-soft: rgba(99, 102, 241, 0.16);
+  --accent-soft-hover: rgba(99, 102, 241, 0.24);
+  --accent-text: #a5b4fc;
+  --accent-border: rgba(129, 140, 248, 0.34);
+  --accent-glow: rgba(99, 102, 241, 0.26);
+
+  /* Semantic — Dark Tuned */
+  --success: #10b981;
+  --success-hover: #34d399;
+  --success-soft: rgba(16, 185, 129, 0.15);
+  --success-text: #34d399;
+  --success-border: rgba(16, 185, 129, 0.32);
+
+  --warning: #f59e0b;
+  --warning-hover: #fbbf24;
+  --warning-soft: rgba(245, 158, 11, 0.15);
+  --warning-text: #fbbf24;
+  --warning-border: rgba(245, 158, 11, 0.32);
+
+  --danger: #ef4444;
+  --danger-hover: #f87171;
+  --danger-soft: rgba(239, 68, 68, 0.15);
+  --danger-text: #f87171;
+  --danger-border: rgba(239, 68, 68, 0.32);
+
+  --info: #38bdf8;
+  --info-soft: rgba(56, 189, 248, 0.15);
+  --info-text: #7dd3fc;
+  --info-border: rgba(56, 189, 248, 0.3);
+
+  /* Category Palette — Dark Mode (aligned with CATEGORY_META) */
+  --cat-work: #818cf8;
+  --cat-work-soft: rgba(99, 102, 241, 0.16);
+  --cat-work-text: #a5b4fc;
+
+  --cat-health: #34d399;
+  --cat-health-soft: rgba(16, 185, 129, 0.16);
+  --cat-health-text: #6ee7b7;
+
+  --cat-learning: #38bdf8;
+  --cat-learning-soft: rgba(14, 165, 233, 0.16);
+  --cat-learning-text: #7dd3fc;
+
+  --cat-personal: #fbbf24;
+  --cat-personal-soft: rgba(245, 158, 11, 0.16);
+  --cat-personal-text: #fcd34d;
+
+  --cat-admin: #a78bfa;
+  --cat-admin-soft: rgba(139, 92, 246, 0.16);
+  --cat-admin-text: #c4b5fd;
+
+  /* Heatmap Consistency Scale — Dark */
+  --heat-0: #181f2c;
+  --heat-1: #28305e;
+  --heat-2: #43499e;
+  --heat-3: #6366f1;
+  --heat-4: #818cf8;
+
+  /* Chart Surfaces */
+  --chart-grid: rgba(148, 163, 184, 0.13);
+  --chart-track: #1e2638;
+  --chart-planned: #2a354d;
+  --chart-tooltip-bg: #1e293b;
+  --chart-tooltip-text: #f8fafc;
+
+  /* Layered Shadows & Clean Inner Highlight */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --shadow-md: 0 6px 16px -2px rgba(0, 0, 0, 0.46), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-lg: 0 16px 36px -6px rgba(0, 0, 0, 0.56), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-xl: 0 24px 56px -12px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --shadow-ring: 0 0 0 3px var(--accent-glow);
+
+  /* Scrollbars */
+  --scrollbar-thumb: rgba(148, 163, 184, 0.22);
+  --scrollbar-thumb-hover: rgba(148, 163, 184, 0.4);
+}
