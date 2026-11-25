@@ -550,6 +550,7 @@ function formatTask(row) {
     status: VALID_STATUSES.has(row.status) ? row.status : 'todo',
     subtasks,
     routineId: row.routine_id || null,
+    completionComment: typeof row.completion_comment === 'string' ? row.completion_comment : '',
     order: Number.isFinite(Number(row.sort_order)) ? Number(row.sort_order) : 0,
     createdAt: row.created_at,
     completedAt: row.completed_at || null
@@ -687,6 +688,9 @@ function normalizeTaskInput(raw, existingTask = null, defaultDate = null) {
       routineId: typeof source.routineId === 'string' && source.routineId.trim()
         ? source.routineId.trim().slice(0, 128)
         : null,
+      completionComment: typeof source.completionComment === 'string'
+        ? source.completionComment.slice(0, 2000)
+        : '',
       order,
       createdAt,
       completedAt
@@ -774,6 +778,7 @@ async function loadWorkspaceForUser(db, userId) {
   return {
     user: formatUser(userRow),
     settings: formatSettings(settingsRow),
+    activeTimer: safeJsonParse(userRow.active_timer_json, null),
     tasks,
     routines,
     reflections
@@ -801,8 +806,8 @@ function buildTaskInsertStmt(db, userId, task) {
     `INSERT INTO tasks (
       id, user_id, title, notes, date, time_block, scheduled_time,
       estimated_minutes, actual_minutes, priority, category, status,
-      subtasks_json, routine_id, sort_order, created_at, completed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      subtasks_json, routine_id, completion_comment, sort_order, created_at, completed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     task.id,
     userId,
@@ -818,6 +823,7 @@ function buildTaskInsertStmt(db, userId, task) {
     task.status,
     JSON.stringify(task.subtasks),
     task.routineId,
+    task.completionComment || '',
     task.order,
     task.createdAt,
     task.completedAt
@@ -829,8 +835,8 @@ function buildTaskUpsertSameUserStmt(db, userId, task) {
     `INSERT INTO tasks (
       id, user_id, title, notes, date, time_block, scheduled_time,
       estimated_minutes, actual_minutes, priority, category, status,
-      subtasks_json, routine_id, sort_order, created_at, completed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      subtasks_json, routine_id, completion_comment, sort_order, created_at, completed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title,
       notes = excluded.notes,
@@ -844,6 +850,7 @@ function buildTaskUpsertSameUserStmt(db, userId, task) {
       status = excluded.status,
       subtasks_json = excluded.subtasks_json,
       routine_id = excluded.routine_id,
+      completion_comment = excluded.completion_comment,
       sort_order = excluded.sort_order,
       completed_at = excluded.completed_at
     WHERE tasks.user_id = ?`
@@ -862,6 +869,7 @@ function buildTaskUpsertSameUserStmt(db, userId, task) {
     task.status,
     JSON.stringify(task.subtasks),
     task.routineId,
+    task.completionComment || '',
     task.order,
     task.createdAt,
     task.completedAt,
@@ -1392,6 +1400,8 @@ async function handlePatchTask(taskId, request, session, env) {
   }
   const task = normalized.task;
 
+  const alertCleared = task.scheduledTime !== existingTask.scheduledTime || task.date !== existingTask.date;
+
   await env.DB.prepare(
     `UPDATE tasks
      SET title = ?,
@@ -1406,6 +1416,8 @@ async function handlePatchTask(taskId, request, session, env) {
          status = ?,
          subtasks_json = ?,
          routine_id = ?,
+         completion_comment = ?,
+         alert_sent_for = CASE WHEN ? = 1 THEN NULL ELSE alert_sent_for END,
          sort_order = ?,
          completed_at = ?
      WHERE id = ? AND user_id = ?`
@@ -1422,6 +1434,8 @@ async function handlePatchTask(taskId, request, session, env) {
     task.status,
     JSON.stringify(task.subtasks),
     task.routineId,
+    task.completionComment || '',
+    alertCleared ? 1 : 0,
     task.order,
     task.completedAt,
     taskId,
@@ -1765,8 +1779,9 @@ function buildMainReplyKeyboard(isLinked, origin) {
     return {
       keyboard: [
         [{ text: "📋 Today's Tasks" }, { text: '➕ Add Task' }],
-        [{ text: '✅ Quick Complete' }, { text: '📊 Progress & Stats' }],
-        [{ text: '⏰ Reminders' }, { text: '🌐 Open TaskFlow', web_app: { url: appUrl } }]
+        [{ text: '✅ Quick Complete' }, { text: '🔄 Routines' }],
+        [{ text: '📊 Progress & Stats' }, { text: '⏰ Reminders' }],
+        [{ text: '🌐 Open TaskFlow', web_app: { url: appUrl } }]
       ],
       resize_keyboard: true,
       is_persistent: true
@@ -1788,6 +1803,14 @@ function encodeTaskToggleData(task, dateKey, idx) {
     return direct;
   }
   return `ti:${dateKey}:${idx}`;
+}
+
+function encodeTaskSimpleData(prefix, task, dateKey, idx) {
+  const direct = `${prefix}:${task.id}`;
+  if (utf8ByteLength(direct) <= 64) {
+    return direct;
+  }
+  return `${prefix}i:${dateKey}:${idx}`;
 }
 
 function encodeTaskAttrData(prefix, task, dateKey, idx, value) {
@@ -1824,7 +1847,10 @@ function buildTodaySummaryMessage(userRow, dateKey, tasks, settingsRow) {
         : (task.status === 'in_progress' ? '⏳' : '⬜');
       const pri = task.priority === 'high' ? ' 🔴' : '';
       const timeHint = task.scheduled_time ? ` <i>(${escapeHtml(task.scheduled_time)})</i>` : '';
-      lines.push(`${idx + 1}. ${icon} ${escapeHtml(task.title)}${timeHint}${pri}`);
+      const noteHint = task.completion_comment
+        ? `\n   <i>💬 ${escapeHtml(truncateButtonLabel(task.completion_comment, 80))}</i>`
+        : '';
+      lines.push(`${idx + 1}. ${icon} ${escapeHtml(task.title)}${timeHint}${pri}${noteHint}`);
     });
     lines.push('');
     lines.push('Tap any task box below to toggle ✅ done / ⬜ open.');
@@ -1833,7 +1859,7 @@ function buildTodaySummaryMessage(userRow, dateKey, tasks, settingsRow) {
   return lines.join('\n');
 }
 
-function buildTodayChecklistView(userRow, dateKey, tasks, settingsRow, origin, openOnly = false) {
+function buildTodayChecklistView(userRow, dateKey, tasks, settingsRow, origin, openOnly = false, justCompleted = null) {
   const indexed = tasks.map((task, idx) => ({ task, idx }));
   const visible = openOnly ? indexed.filter((item) => item.task.status !== 'done') : indexed;
   const capped = visible.slice(0, 12);
@@ -1863,9 +1889,17 @@ function buildTodayChecklistView(userRow, dateKey, tasks, settingsRow, origin, o
     }];
   });
 
+  if (justCompleted && justCompleted.task) {
+    rows.push([{
+      text: `💬 Add Done Comment: ${truncateButtonLabel(justCompleted.task.title, 22)}`,
+      callback_data: encodeTaskSimpleData('tc', justCompleted.task, dateKey, justCompleted.idx)
+    }]);
+  }
+
   rows.push([
     { text: '➕ Add Task', callback_data: 'act:add' },
-    { text: '🔄 Refresh', callback_data: openOnly ? 'act:quick' : 'act:today' }
+    { text: '🔄 Routines', callback_data: 'act:routines' },
+    { text: '🔁 Refresh', callback_data: openOnly ? 'act:quick' : 'act:today' }
   ]);
   rows.push([
     { text: openOnly ? '📋 All Today' : '✅ Open Only', callback_data: openOnly ? 'act:today' : 'act:quick' },
@@ -1883,23 +1917,42 @@ function buildTodayChecklistView(userRow, dateKey, tasks, settingsRow, origin, o
   };
 }
 
-function buildTaskCreatedView(task, idxForFallback = 0) {
+function buildTaskCreatedView(task, idxForFallback = 0, todayKeyForUser = null) {
   const priMap = { high: '🔴 High', medium: '🟡 Medium', low: '🟢 Low' };
   const blockMap = { morning: '🌅 Morning', afternoon: '☀️ Afternoon', evening: '🌙 Evening', anytime: '📥 Anytime' };
+  const catMap = { work: '💼 Work', health: '💚 Health', learning: '📚 Learning', personal: '🏠 Personal', admin: '🗂 Admin' };
   const priLabel = priMap[task.priority] || '🟡 Medium';
   const blockLabel = blockMap[task.timeBlock] || '📥 Anytime';
+  const catLabel = catMap[task.category] || '💼 Work';
   const statusIcon = task.status === 'done' ? '✅ Completed' : '⬜ Open';
 
-  const text = [
-    `✅ <b>Saved for <code>${escapeHtml(task.date)}</code>:</b>`,
+  const baseToday = isValidDateKey(todayKeyForUser) ? todayKeyForUser : task.date;
+  const isToday = task.date === baseToday;
+  const isTomorrow = task.date === addDaysToDateKey(baseToday, 1);
+
+  const lines = [
+    `✅ <b>Saved for <code>${escapeHtml(task.date)}</code>${isTomorrow ? ' (Tomorrow)' : ''}:</b>`,
     `<b>${escapeHtml(task.title)}</b>`,
-    `${statusIcon} • ${priLabel} • ${blockLabel}`,
-    '',
-    'Tap any box below to adjust priority or time block:'
-  ].join('\n');
+    `${statusIcon} • ${priLabel} • ${catLabel} • ${blockLabel}`
+  ];
+  if (task.completionComment) {
+    lines.push(`<i>💬 ${escapeHtml(task.completionComment)}</i>`);
+  }
+  lines.push('');
+  lines.push('Tap any box below to customize schedule, category, priority, or status:');
 
   const inlineKeyboard = {
     inline_keyboard: [
+      [
+        { text: isToday ? '📅 Today ✓' : '📅 Today', callback_data: encodeTaskAttrData('td', task, task.date, idxForFallback, 'today') },
+        { text: isTomorrow ? '📆 Tomorrow ✓' : '📆 Tomorrow', callback_data: encodeTaskAttrData('td', task, task.date, idxForFallback, 'tomorrow') }
+      ],
+      [
+        { text: task.category === 'work' ? '💼 Work ✓' : '💼 Work', callback_data: encodeTaskAttrData('cat', task, task.date, idxForFallback, 'work') },
+        { text: task.category === 'health' ? '💚 Health ✓' : '💚 Health', callback_data: encodeTaskAttrData('cat', task, task.date, idxForFallback, 'health') },
+        { text: task.category === 'learning' ? '📚 Learn ✓' : '📚 Learn', callback_data: encodeTaskAttrData('cat', task, task.date, idxForFallback, 'learning') },
+        { text: task.category === 'personal' ? '🏠 Personal ✓' : '🏠 Personal', callback_data: encodeTaskAttrData('cat', task, task.date, idxForFallback, 'personal') }
+      ],
       [
         { text: task.priority === 'high' ? '🔴 High ✓' : '🔴 High', callback_data: encodeTaskAttrData('tp', task, task.date, idxForFallback, 'high') },
         { text: task.priority === 'medium' ? '🟡 Med ✓' : '🟡 Med', callback_data: encodeTaskAttrData('tp', task, task.date, idxForFallback, 'medium') },
@@ -1912,12 +1965,13 @@ function buildTaskCreatedView(task, idxForFallback = 0) {
       ],
       [
         { text: task.status === 'done' ? '↩️ Reopen Task' : '✅ Mark Done', callback_data: encodeTaskToggleData(task, task.date, idxForFallback) },
+        ...(task.status === 'done' ? [{ text: '💬 Done Comment', callback_data: encodeTaskSimpleData('tc', task, task.date, idxForFallback) }] : []),
         { text: "📋 Today's Tasks", callback_data: 'act:today' }
       ]
     ]
   };
 
-  return { text, inlineKeyboard };
+  return { text: lines.join('\n'), inlineKeyboard };
 }
 
 function buildRemindersView(userRow) {
@@ -2055,7 +2109,7 @@ async function createQuickTaskForTelegramUser(db, userRow, todayKey, title) {
 }
 
 async function resolveTaskFromCallbackToken(db, userId, modePrefix, payload) {
-  if (modePrefix === 't' || modePrefix === 'tp' || modePrefix === 'tb') {
+  if (['t', 'tp', 'tb', 'td', 'cat', 'tc', 'ts'].includes(modePrefix)) {
     const row = await db.prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?')
       .bind(payload.id, userId)
       .first();
@@ -2067,6 +2121,116 @@ async function resolveTaskFromCallbackToken(db, userId, modePrefix, payload) {
   const rows = res?.results || [];
   const row = rows[payload.idx] || null;
   return row ? { row, indexInDay: payload.idx } : null;
+}
+
+function isWeekdayDateKey(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  const day = dt.getUTCDay();
+  return day >= 1 && day <= 5;
+}
+
+async function buildRoutinesView(db, userRow, todayKey, origin) {
+  const [routinesRes, todayTasksRes] = await db.batch([
+    db.prepare('SELECT * FROM routines WHERE user_id = ? ORDER BY created_at ASC').bind(userRow.id),
+    db.prepare('SELECT id, routine_id, status FROM tasks WHERE user_id = ? AND date = ?').bind(userRow.id, todayKey)
+  ]);
+
+  const routines = (routinesRes?.results || []).filter((r) => Boolean(r.active));
+  const byRoutineId = new Map();
+  for (const t of todayTasksRes?.results || []) {
+    if (t.routine_id) byRoutineId.set(t.routine_id, t);
+  }
+
+  if (routines.length === 0) {
+    return {
+      text: '🔄 <b>Daily Routines</b>\n\nNo active routines yet. Create recurring routines in TaskFlow → Routines on the web!',
+      inlineKeyboard: {
+        inline_keyboard: [
+          [{ text: "📋 Today's Tasks", callback_data: 'act:today' }],
+          ...(resolveTelegramAppUrl(origin) === origin ? [[{ text: '🌐 Open Routines', web_app: { url: origin } }]] : [])
+        ]
+      }
+    };
+  }
+
+  const lines = [
+    `🔄 <b>Daily Routines (${escapeHtml(todayKey)})</b>`,
+    ''
+  ];
+
+  const rows = [];
+  routines.slice(0, 12).forEach((r, idx) => {
+    const linkedTask = byRoutineId.get(r.id);
+    const statusIcon = linkedTask
+      ? (linkedTask.status === 'done' ? '✅' : '⬜')
+      : '➕';
+    const schedNote = r.schedule === 'weekdays' ? ' (weekdays)' : '';
+    lines.push(`${statusIcon} ${escapeHtml(r.title)}${schedNote}`);
+    const cb = utf8ByteLength(`rt:${r.id}`) <= 64 ? `rt:${r.id}` : `rti:${idx}`;
+    rows.push([{
+      text: `${statusIcon} ${truncateButtonLabel(r.title, 34)}`,
+      callback_data: cb
+    }]);
+  });
+
+  lines.push('');
+  lines.push('Tap any routine box to add & check off for today.');
+
+  rows.push([
+    { text: '✨ Apply All Due Today', callback_data: 'act:apply_routines' },
+    { text: "📋 Today's Tasks", callback_data: 'act:today' }
+  ]);
+
+  return {
+    text: lines.join('\n'),
+    inlineKeyboard: { inline_keyboard: rows }
+  };
+}
+
+async function applyActiveRoutinesForUser(db, userId, todayKey) {
+  const [routinesRes, todayTasksRes, maxRes] = await db.batch([
+    db.prepare('SELECT * FROM routines WHERE user_id = ? AND active = 1 ORDER BY created_at ASC').bind(userId),
+    db.prepare('SELECT routine_id FROM tasks WHERE user_id = ? AND date = ? AND routine_id IS NOT NULL').bind(userId, todayKey),
+    db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM tasks WHERE user_id = ? AND date = ?').bind(userId, todayKey)
+  ]);
+
+  const existingIds = new Set((todayTasksRes?.results || []).map((r) => r.routine_id));
+  let nextOrder = Number(maxRes?.results?.[0]?.max_order ?? -1) + 1;
+  const stmts = [];
+  const nowIso = new Date().toISOString();
+
+  for (const rRow of routinesRes?.results || []) {
+    const routine = formatRoutine(rRow);
+    if (!routine.active) continue;
+    if (routine.schedule === 'weekdays' && !isWeekdayDateKey(todayKey)) continue;
+    if (existingIds.has(routine.id)) continue;
+
+    stmts.push(buildTaskInsertStmt(db, userId, {
+      id: `task_${crypto.randomUUID()}`,
+      title: routine.title,
+      notes: '',
+      date: todayKey,
+      timeBlock: routine.timeBlock,
+      scheduledTime: '',
+      estimatedMinutes: routine.estimatedMinutes,
+      actualMinutes: 0,
+      priority: routine.priority,
+      category: routine.category,
+      status: 'todo',
+      subtasks: routine.subtasks.map((st) => ({ id: `sub_${crypto.randomUUID().slice(0, 8)}`, title: st, done: false })),
+      routineId: routine.id,
+      completionComment: '',
+      order: nextOrder++,
+      createdAt: nowIso,
+      completedAt: null
+    }));
+  }
+
+  if (stmts.length > 0) {
+    await db.batch(stmts);
+  }
+  return stmts.length;
 }
 
 async function computeUserStatsMessage(db, userRow, todayDateKey) {
@@ -2377,6 +2541,93 @@ async function processTelegramCallbackQuery(callbackQuery, env, origin) {
     return;
   }
 
+  if (data === 'act:routines') {
+    const view = await buildRoutinesView(env.DB, userRow, todayKey, origin);
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId);
+    if (messageId) {
+      await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, view.text, view.inlineKeyboard);
+    } else {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, view.text, view.inlineKeyboard);
+    }
+    return;
+  }
+
+  if (data === 'act:apply_routines') {
+    const createdCount = await applyActiveRoutinesForUser(env.DB, userRow.id, todayKey);
+    const view = await buildRoutinesView(env.DB, userRow, todayKey, origin);
+    await answerTelegramCallback(
+      env.TELEGRAM_BOT_TOKEN,
+      callbackId,
+      createdCount > 0 ? `✨ Applied ${createdCount} routine(s)` : 'Already up to date'
+    );
+    if (messageId) {
+      await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, view.text, view.inlineKeyboard);
+    }
+    return;
+  }
+
+  if (data.startsWith('rt:') || data.startsWith('rti:')) {
+    const routinesRes = await env.DB.prepare('SELECT * FROM routines WHERE user_id = ? AND active = 1 ORDER BY created_at ASC')
+      .bind(userRow.id)
+      .all();
+    const routines = routinesRes?.results || [];
+    const targetRoutine = data.startsWith('rt:')
+      ? routines.find((r) => r.id === data.slice(3))
+      : routines[Number(data.slice(4))];
+
+    if (!targetRoutine) {
+      await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, 'Routine not found', true);
+      return;
+    }
+
+    const existingTask = await env.DB.prepare(
+      'SELECT * FROM tasks WHERE user_id = ? AND date = ? AND routine_id = ?'
+    ).bind(userRow.id, todayKey, targetRoutine.id).first();
+
+    let toastText = '';
+    if (!existingTask) {
+      const rNorm = formatRoutine(targetRoutine);
+      const maxRow = await env.DB.prepare(
+        'SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM tasks WHERE user_id = ? AND date = ?'
+      ).bind(userRow.id, todayKey).first();
+      const nowIso = new Date().toISOString();
+      await buildTaskInsertStmt(env.DB, userRow.id, {
+        id: `task_${crypto.randomUUID()}`,
+        title: rNorm.title,
+        notes: '',
+        date: todayKey,
+        timeBlock: rNorm.timeBlock,
+        scheduledTime: '',
+        estimatedMinutes: rNorm.estimatedMinutes,
+        actualMinutes: 0,
+        priority: rNorm.priority,
+        category: rNorm.category,
+        status: 'done',
+        subtasks: rNorm.subtasks.map((st) => ({ id: `sub_${crypto.randomUUID().slice(0, 8)}`, title: st, done: true })),
+        routineId: rNorm.id,
+        completionComment: '',
+        order: Number(maxRow?.max_order ?? -1) + 1,
+        createdAt: nowIso,
+        completedAt: nowIso
+      }).run();
+      toastText = '✅ Routine checked off!';
+    } else {
+      const nextStatus = existingTask.status === 'done' ? 'todo' : 'done';
+      const nextCompleted = nextStatus === 'done' ? (existingTask.completed_at || new Date().toISOString()) : null;
+      await env.DB.prepare('UPDATE tasks SET status = ?, completed_at = ? WHERE id = ? AND user_id = ?')
+        .bind(nextStatus, nextCompleted, existingTask.id, userRow.id)
+        .run();
+      toastText = nextStatus === 'done' ? '✅ Routine completed!' : '↩️ Routine reopened';
+    }
+
+    const view = await buildRoutinesView(env.DB, userRow, todayKey, origin);
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, toastText);
+    if (messageId) {
+      await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, view.text, view.inlineKeyboard);
+    }
+    return;
+  }
+
   if (data.startsWith('rem:')) {
     const parts = data.split(':');
     const nowIso = new Date().toISOString();
@@ -2412,19 +2663,20 @@ async function processTelegramCallbackQuery(callbackQuery, env, origin) {
     return;
   }
 
-  // Task priority / time block / toggle callbacks
+  // Task priority / time block / date / category / snooze / comment / toggle callbacks
   let taskOp = null;
   const colonParts = data.split(':');
-  if (colonParts[0] === 't' && colonParts.length === 2) {
-    taskOp = { kind: 'toggle', lookupMode: 't', id: colonParts[1] };
-  } else if (colonParts[0] === 'ti' && colonParts.length === 3) {
-    taskOp = { kind: 'toggle', lookupMode: 'ti', dateKey: colonParts[1], idx: Number(colonParts[2]) };
-  } else if ((colonParts[0] === 'tp' || colonParts[0] === 'tb') && colonParts.length === 3) {
-    taskOp = { kind: colonParts[0], lookupMode: colonParts[0], id: colonParts[1], value: colonParts[2] };
-  } else if ((colonParts[0] === 'tpi' || colonParts[0] === 'tbi') && colonParts.length === 4) {
+  const p0 = colonParts[0];
+  if ((p0 === 't' || p0 === 'tc') && colonParts.length === 2) {
+    taskOp = { kind: p0 === 'tc' ? 'commentPrompt' : 'toggle', lookupMode: p0, id: colonParts[1] };
+  } else if ((p0 === 'ti' || p0 === 'tci') && colonParts.length === 3) {
+    taskOp = { kind: p0 === 'tci' ? 'commentPrompt' : 'toggle', lookupMode: p0, dateKey: colonParts[1], idx: Number(colonParts[2]) };
+  } else if ((p0 === 'tp' || p0 === 'tb' || p0 === 'td' || p0 === 'cat' || p0 === 'ts') && colonParts.length === 3) {
+    taskOp = { kind: p0, lookupMode: p0, id: colonParts[1], value: colonParts[2] };
+  } else if ((p0 === 'tpi' || p0 === 'tbi' || p0 === 'tdi' || p0 === 'cati' || p0 === 'tsi') && colonParts.length === 4) {
     taskOp = {
-      kind: colonParts[0].slice(0, 2),
-      lookupMode: 'ti',
+      kind: p0.slice(0, -1),
+      lookupMode: p0,
       dateKey: colonParts[1],
       idx: Number(colonParts[2]),
       value: colonParts[3]
@@ -2450,6 +2702,46 @@ async function processTelegramCallbackQuery(callbackQuery, env, origin) {
       )
     );
 
+    if (taskOp.kind === 'commentPrompt') {
+      await setChatState(env.DB, chatId, 'awaiting_done_comment', row.id);
+      await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId);
+      await sendTelegramMessage(
+        env.TELEGRAM_BOT_TOKEN,
+        chatId,
+        `💬 Send your completion comment for:\n<b>${escapeHtml(row.title)}</b>`,
+        { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'act:cancel' }]] }
+      );
+      return;
+    }
+
+    if (taskOp.kind === 'ts') {
+      const addMins = Math.max(15, Math.min(240, Number(taskOp.value) || 60));
+      const baseDate = isValidDateKey(row.date) ? row.date : todayKey;
+      let nextMins = 9 * 60 + addMins;
+      const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(row.scheduled_time || ''));
+      if (m) nextMins = Number(m[1]) * 60 + Number(m[2]) + addMins;
+      let nextDate = baseDate;
+      if (nextMins >= 24 * 60) {
+        nextDate = addDaysToDateKey(baseDate, Math.floor(nextMins / (24 * 60)));
+        nextMins = nextMins % (24 * 60);
+      }
+      const nextTime = `${String(Math.floor(nextMins / 60)).padStart(2, '0')}:${String(nextMins % 60).padStart(2, '0')}`;
+      await env.DB.prepare(
+        'UPDATE tasks SET date = ?, scheduled_time = ?, alert_sent_for = NULL WHERE id = ? AND user_id = ?'
+      ).bind(nextDate, nextTime, row.id, userRow.id).run();
+      await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, `⏰ Snoozed to ${nextTime}`);
+      if (messageId) {
+        await editTelegramMessage(
+          env.TELEGRAM_BOT_TOKEN,
+          chatId,
+          messageId,
+          `⏰ <b>Snoozed to ${escapeHtml(nextTime)}</b> (<code>${escapeHtml(nextDate)}</code>)\n<b>${escapeHtml(row.title)}</b>`,
+          { inline_keyboard: [[{ text: '✅ Mark Done Now', callback_data: encodeTaskToggleData(row, nextDate, resolved.indexInDay) }, { text: "📋 Today's Tasks", callback_data: 'act:today' }]] }
+        );
+      }
+      return;
+    }
+
     if (taskOp.kind === 'toggle') {
       const nextStatus = row.status === 'done' ? 'todo' : 'done';
       const nextCompletedAt = nextStatus === 'done' ? (row.completed_at || new Date().toISOString()) : null;
@@ -2464,18 +2756,19 @@ async function processTelegramCallbackQuery(callbackQuery, env, origin) {
       );
 
       if (messageId) {
-        if (isTaskCreationMessage) {
-          const freshRow = await env.DB.prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?')
-            .bind(row.id, userRow.id)
-            .first();
-          if (freshRow) {
-            const card = buildTaskCreatedView(formatTask(freshRow), resolved.indexInDay);
-            await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, card.text, card.inlineKeyboard);
-          }
+        const freshRow = await env.DB.prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?')
+          .bind(row.id, userRow.id)
+          .first();
+        if (isTaskCreationMessage && freshRow) {
+          const card = buildTaskCreatedView(formatTask(freshRow), resolved.indexInDay, todayKey);
+          await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, card.text, card.inlineKeyboard);
         } else {
           const targetDate = row.date || todayKey;
           const { tasks, settingsRow } = await loadTodayTasksAndSettings(env.DB, userRow.id, targetDate);
-          const view = buildTodayChecklistView(userRow, targetDate, tasks, settingsRow, origin, isOpenOnlyMessage);
+          const completedPayload = nextStatus === 'done' && freshRow
+            ? { task: formatTask(freshRow), idx: resolved.indexInDay }
+            : null;
+          const view = buildTodayChecklistView(userRow, targetDate, tasks, settingsRow, origin, isOpenOnlyMessage, completedPayload);
           await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, view.text, view.inlineKeyboard);
         }
       }
@@ -2492,6 +2785,17 @@ async function processTelegramCallbackQuery(callbackQuery, env, origin) {
         .bind(taskOp.value, row.id, userRow.id)
         .run();
       await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, `Time block: ${taskOp.value}`);
+    } else if (taskOp.kind === 'td') {
+      const nextDate = taskOp.value === 'tomorrow' ? addDaysToDateKey(todayKey, 1) : todayKey;
+      await env.DB.prepare('UPDATE tasks SET date = ?, alert_sent_for = NULL WHERE id = ? AND user_id = ?')
+        .bind(nextDate, row.id, userRow.id)
+        .run();
+      await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, taskOp.value === 'tomorrow' ? 'Moved to Tomorrow' : 'Scheduled for Today');
+    } else if (taskOp.kind === 'cat' && VALID_CATEGORIES.has(taskOp.value)) {
+      await env.DB.prepare('UPDATE tasks SET category = ? WHERE id = ? AND user_id = ?')
+        .bind(taskOp.value, row.id, userRow.id)
+        .run();
+      await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, `Category: ${taskOp.value}`);
     }
 
     if (messageId) {
@@ -2499,7 +2803,7 @@ async function processTelegramCallbackQuery(callbackQuery, env, origin) {
         .bind(row.id, userRow.id)
         .first();
       if (freshRow) {
-        const card = buildTaskCreatedView(formatTask(freshRow), resolved.indexInDay);
+        const card = buildTaskCreatedView(formatTask(freshRow), resolved.indexInDay, todayKey);
         await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, card.text, card.inlineKeyboard);
       }
     }
@@ -2662,6 +2966,13 @@ async function processTelegramWebhookUpdate(update, env, origin = DEFAULT_PUBLIC
     return;
   }
 
+  if (cmd === '/routines' || rawText === '🔄 Routines') {
+    await clearChatState(env.DB, chatId);
+    const view = await buildRoutinesView(env.DB, userRow, todayKey, origin);
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, view.text, view.inlineKeyboard);
+    return;
+  }
+
   if (cmd === '/add') {
     await clearChatState(env.DB, chatId);
     if (!arg) {
@@ -2676,7 +2987,7 @@ async function processTelegramWebhookUpdate(update, env, origin = DEFAULT_PUBLIC
     }
 
     const { task, indexInDay } = await createQuickTaskForTelegramUser(env.DB, userRow, todayKey, arg);
-    const card = buildTaskCreatedView(task, indexInDay);
+    const card = buildTaskCreatedView(task, indexInDay, todayKey);
     await sendTelegramMessage(
       env.TELEGRAM_BOT_TOKEN,
       chatId,
@@ -2688,7 +2999,9 @@ async function processTelegramWebhookUpdate(update, env, origin = DEFAULT_PUBLIC
 
   if (cmd === '/done') {
     await clearChatState(env.DB, chatId);
-    const cleanNum = arg.replace(/^#/, '').trim();
+    const doneTokens = arg.trim().split(/\s+/);
+    const cleanNum = (doneTokens[0] || '').replace(/^#/, '');
+    const doneComment = arg.trim().slice((doneTokens[0] || '').length).trim().slice(0, 2000);
     const idx = parseInt(cleanNum, 10);
     if (!Number.isFinite(idx) || idx < 1 || !/^\d+$/.test(cleanNum)) {
       const { tasks, settingsRow } = await loadTodayTasksAndSettings(env.DB, userRow.id, todayKey);
@@ -2714,21 +3027,26 @@ async function processTelegramWebhookUpdate(update, env, origin = DEFAULT_PUBLIC
 
     const target = tasks[idx - 1];
     const nowIso = new Date().toISOString();
-    if (target.status !== 'done') {
-      await env.DB.prepare(
-        `UPDATE tasks
-         SET status = 'done',
-             completed_at = COALESCE(completed_at, ?)
-         WHERE id = ? AND user_id = ?`
-      ).bind(nowIso, target.id, userRow.id).run();
-    }
+    await env.DB.prepare(
+      `UPDATE tasks
+       SET status = 'done',
+           completed_at = COALESCE(completed_at, ?),
+           completion_comment = CASE WHEN ? != '' THEN ? ELSE completion_comment END
+       WHERE id = ? AND user_id = ?`
+    ).bind(nowIso, doneComment, doneComment, target.id, userRow.id).run();
 
     const doneCount = tasks.filter((t, i) => i === idx - 1 || t.status === 'done').length;
+    const commentLine = doneComment ? `\n💬 <i>${escapeHtml(doneComment)}</i>` : '';
     await sendTelegramMessage(
       env.TELEGRAM_BOT_TOKEN,
       chatId,
-      `🎉 Completed #${idx}: <b>${escapeHtml(target.title)}</b>\nToday's progress: <b>${doneCount}/${tasks.length}</b>`,
-      { inline_keyboard: [[{ text: '✅ Quick Complete More', callback_data: 'act:quick' }, { text: "📋 Today's Tasks", callback_data: 'act:today' }]] }
+      `🎉 Completed #${idx}: <b>${escapeHtml(target.title)}</b>${commentLine}\nToday's progress: <b>${doneCount}/${tasks.length}</b>`,
+      {
+        inline_keyboard: [
+          [{ text: '💬 Add / Edit Comment', callback_data: encodeTaskSimpleData('tc', target, todayKey, idx - 1) }],
+          [{ text: '✅ Quick Complete More', callback_data: 'act:quick' }, { text: "📋 Today's Tasks", callback_data: 'act:today' }]
+        ]
+      }
     );
     return;
   }
@@ -2743,12 +3061,40 @@ async function processTelegramWebhookUpdate(update, env, origin = DEFAULT_PUBLIC
     return;
   }
 
-  // Plain text handling for linked users: instant add after tapping "➕ Add Task", or 1-tap confirm draft!
+  // Plain text handling for linked users: completion comment, guided task add, or 1-tap confirm draft
   const chatState = await getChatState(env.DB, chatId);
+  if (chatState?.action === 'awaiting_done_comment' && chatState.draft_text) {
+    const taskId = chatState.draft_text;
+    await clearChatState(env.DB, chatId);
+    const cleanComment = rawText.slice(0, 2000);
+    const updatedRes = await env.DB.prepare(
+      `UPDATE tasks SET completion_comment = ? WHERE id = ? AND user_id = ?`
+    ).bind(cleanComment, taskId, userRow.id).run();
+    if (!updatedRes?.meta?.changes) {
+      await sendTelegramMessage(
+        env.TELEGRAM_BOT_TOKEN,
+        chatId,
+        'Task not found. Tap Today\'s Tasks to continue.',
+        buildMainReplyKeyboard(true, origin)
+      );
+      return;
+    }
+    const row = await env.DB.prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?')
+      .bind(taskId, userRow.id)
+      .first();
+    await sendTelegramMessage(
+      env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      `💬 <b>Comment saved</b> on <b>${escapeHtml(row?.title || 'task')}</b>:\n<i>"${escapeHtml(cleanComment)}"</i>`,
+      { inline_keyboard: [[{ text: "📋 Today's Tasks", callback_data: 'act:today' }, { text: '✅ Quick Complete', callback_data: 'act:quick' }]] }
+    );
+    return;
+  }
+
   if (chatState?.action === 'awaiting_task_title') {
     await clearChatState(env.DB, chatId);
     const { task, indexInDay } = await createQuickTaskForTelegramUser(env.DB, userRow, todayKey, rawText);
-    const card = buildTaskCreatedView(task, indexInDay);
+    const card = buildTaskCreatedView(task, indexInDay, todayKey);
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, card.text, card.inlineKeyboard);
     return;
   }
@@ -2918,6 +3264,75 @@ async function handleTelegramMiniAppAuth(request, env) {
 }
 
 /* ============================================================================
+ * Cross-Device Focus Timer & Account Deletion Handlers
+ * ========================================================================== */
+
+const VALID_TIMER_MODES = new Set(['pomodoro', 'deep', 'break', 'stopwatch']);
+const VALID_TIMER_STATUSES = new Set(['idle', 'running', 'paused', 'completed']);
+
+function normalizeTimerPayload(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const mode = VALID_TIMER_MODES.has(raw.mode) ? raw.mode : 'pomodoro';
+  const status = VALID_TIMER_STATUSES.has(raw.status) ? raw.status : 'idle';
+  return {
+    mode,
+    status,
+    durationSeconds: clampInt(raw.durationSeconds, 0, 14400, mode === 'stopwatch' ? 0 : 1500),
+    startedAtMs: Number.isFinite(Number(raw.startedAtMs)) ? Math.max(0, Math.round(Number(raw.startedAtMs))) : 0,
+    elapsedBeforePauseSeconds: clampInt(raw.elapsedBeforePauseSeconds, 0, 86400, 0),
+    attachedTaskId: typeof raw.attachedTaskId === 'string' && raw.attachedTaskId.trim()
+      ? raw.attachedTaskId.trim().slice(0, 128)
+      : null,
+    updatedAt: typeof raw.updatedAt === 'string' && raw.updatedAt ? raw.updatedAt : new Date().toISOString()
+  };
+}
+
+async function handlePutTimer(request, session, env) {
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) {
+    return errorResponse(400, parsed.error, 'VALIDATION_ERROR');
+  }
+  const normalized = normalizeTimerPayload(parsed.data);
+  if (!normalized) {
+    return errorResponse(400, 'Invalid timer payload', 'VALIDATION_ERROR');
+  }
+
+  const nowIso = new Date().toISOString();
+  await env.DB.prepare(
+    `UPDATE users
+     SET active_timer_json = ?,
+         timer_notified_for = CASE WHEN ? != 'running' THEN NULL ELSE timer_notified_for END,
+         updated_at = ?
+     WHERE id = ?`
+  ).bind(JSON.stringify(normalized), normalized.status, nowIso, session.userId).run();
+
+  return jsonResponse({ ok: true, activeTimer: normalized });
+}
+
+async function handleDeleteAccount(request, session, env) {
+  const url = new URL(request.url);
+  const stmts = [
+    env.DB.prepare('DELETE FROM tasks WHERE user_id = ?').bind(session.userId),
+    env.DB.prepare('DELETE FROM routines WHERE user_id = ?').bind(session.userId),
+    env.DB.prepare('DELETE FROM reflections WHERE user_id = ?').bind(session.userId),
+    env.DB.prepare('DELETE FROM user_settings WHERE user_id = ?').bind(session.userId),
+    env.DB.prepare('DELETE FROM telegram_link_codes WHERE user_id = ?').bind(session.userId)
+  ];
+  if (session.userRow?.telegram_chat_id) {
+    stmts.push(
+      env.DB.prepare('DELETE FROM telegram_chat_states WHERE chat_id = ?').bind(session.userRow.telegram_chat_id)
+    );
+  }
+  stmts.push(env.DB.prepare('DELETE FROM users WHERE id = ?').bind(session.userId));
+
+  await env.DB.batch(stmts);
+
+  const headers = new Headers();
+  clearSessionCookie(headers, url);
+  return jsonResponse({ ok: true }, 200, headers);
+}
+
+/* ============================================================================
  * Main Router & Cloudflare Pages Entrypoints
  * ========================================================================== */
 
@@ -2999,6 +3414,16 @@ export async function handleApiRequest(request, env, ctx) {
     if (segments.length === 2 && segments[1] === 'settings') {
       if (method !== 'PUT') return errorResponse(405, 'Method not allowed', 'METHOD_NOT_ALLOWED');
       return handlePutSettings(request, session, env);
+    }
+
+    if (segments.length === 2 && segments[1] === 'timer') {
+      if (method !== 'PUT') return errorResponse(405, 'Method not allowed', 'METHOD_NOT_ALLOWED');
+      return handlePutTimer(request, session, env);
+    }
+
+    if (segments.length === 2 && segments[1] === 'account') {
+      if (method !== 'DELETE') return errorResponse(405, 'Method not allowed', 'METHOD_NOT_ALLOWED');
+      return handleDeleteAccount(request, session, env);
     }
 
     if (segments.length === 3 && segments[1] === 'tasks' && segments[2] === 'batch') {

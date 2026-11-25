@@ -9,8 +9,8 @@ export default defineConfig({
       enabled: true,
     },
     triggers: [
-      // Runs at the top of every hour UTC to match each user's local timezone hour
-      triggers.scheduled({ schedule: "0 * * * *" }),
+      // Runs every 5 minutes UTC for morning/evening digests, task-time pings, focus timer alerts, and Sunday weekly scorecard
+      triggers.scheduled({ schedule: "*/5 * * * *" }),
     ],
     env: {
       DB: bindings.d1({

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#4f46e5">
+  <title>Privacy Policy — TaskFlow</title>
+  <link rel="icon" type="image/svg+xml" href="/icons/icon.svg">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('taskflow_active_theme');
+        if (t !== 'dark' && t !== 'light') {
+          var raw = localStorage.getItem('taskflow_state_v1');
+          if (raw) {
+            var parsed = JSON.parse(raw);
+            if (parsed && (parsed.theme === 'dark' || parsed.theme === 'light')) t = parsed.theme;
+          }
+        }
+        if (t === 'dark' || t === 'light') {
+          document.documentElement.setAttribute('data-theme', t);
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/base.css">
+  <style>
+    body {
+      min-height: 100vh;
+      background-color: var(--bg-app);
+      color: var(--text-primary);
+      padding: var(--space-6) var(--space-4);
+    }
+    .privacy-shell {
+      max-width: 740px;
+      margin: 0 auto;
+      background-color: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow-lg);
+      padding: var(--space-8) var(--space-6);
+    }
+    .privacy-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-3);
+      flex-wrap: wrap;
+      margin-bottom: var(--space-6);
+      padding-bottom: var(--space-4);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .privacy-brand {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+    }
+    .privacy-logo {
+      width: 38px;
+      height: 38px;
+      border-radius: var(--radius-md);
+      background: linear-gradient(135deg, #4f46e5, #6366f1);
+      color: #ffffff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .privacy-brand-title {
+      font-size: var(--text-md);
+      font-weight: 700;
+      letter-spacing: var(--tracking-tight);
+    }
+    .privacy-brand-sub {
+      font-size: var(--text-xs);
+      color: var(--text-muted);
+    }
+    .privacy-back {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 14px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--border-default);
+      background-color: var(--bg-surface-subtle);
+      color: var(--text-primary);
+      text-decoration: none;
+      font-size: var(--text-sm);
+      font-weight: 500;
+    }
+    .privacy-back:hover {
+      border-color: var(--accent-border);
+      color: var(--accent-text);
+    }
+    h1 {
+      font-size: var(--text-2xl);
+      font-weight: 700;
+      letter-spacing: var(--tracking-tight);
+      margin-bottom: var(--space-2);
+    }
+    .privacy-updated {
+      font-size: var(--text-xs);
+      color: var(--text-muted);
+      margin-bottom: var(--space-6);
+    }
+    .privacy-section {
+      margin-bottom: var(--space-5);
+    }
+    .privacy-section h2 {
+      font-size: var(--text-md);
+      font-weight: 600;
+      margin-bottom: var(--space-2);
+      color: var(--text-primary);
+    }
+    .privacy-section p,
+    .privacy-section li {
+      font-size: var(--text-base);
+      line-height: var(--leading-relaxed);
+      color: var(--text-secondary);
+    }
+    .privacy-section ul {
+      padding-left: var(--space-5);
+      margin-top: var(--space-2);
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-1-5);
+    }
+    .privacy-callout {
+      padding: var(--space-4);
+      border-radius: var(--radius-md);
+      background-color: var(--bg-surface-subtle);
+      border: 1px solid var(--border-subtle);
+      margin-top: var(--space-3);
+    }
+    @media (max-width: 540px) {
+      .privacy-shell {
+        padding: var(--space-5) var(--space-4);
+      }
+      h1 {
+        font-size: var(--text-xl);
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="privacy-shell">
+    <header class="privacy-top">
+      <div class="privacy-brand">
+        <span class="privacy-logo" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <path d="M5 12.5l4.2 4.2L19 7" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+        <div>
+          <div class="privacy-brand-title">TaskFlow</div>
+          <div class="privacy-brand-sub">Personal Productivity &amp; Progress Tracker</div>
+        </div>
+      </div>
+      <a class="privacy-back" href="/">&larr; Back to TaskFlow</a>
+    </header>
+
+    <h1>Privacy Policy</h1>
+    <p class="privacy-updated">Last updated: November 2026 &middot; workflow.myclass.uz</p>
+
+    <section class="privacy-section">
+      <h2>1. Local Guest Mode vs. Cloud Cabinet</h2>
+      <p>You can use TaskFlow completely offline in Local Guest Mode without creating an account. In Guest Mode, your tasks, routines, reflections, and timer state stay strictly in your browser's localStorage and never leave your device.</p>
+    </section>
+
+    <section class="privacy-section">
+      <h2>2. Google Sign-In Data We Access</h2>
+      <p>When you choose <strong>Continue with Google</strong>, TaskFlow requests only minimal identity scopes (<code class="kbd">openid</code>, <code class="kbd">email</code>, <code class="kbd">profile</code>):</p>
+      <ul>
+        <li>Your Google user ID, email address, display name, and profile photo URL to create your isolated Personal Cabinet.</li>
+        <li>A signed <code class="kbd">HttpOnly</code> session cookie (<code class="kbd">tf_session</code>) so your requests remain authenticated.</li>
+        <li>TaskFlow does <strong>not</strong> read your Gmail, Google Drive, Calendar, or Contacts.</li>
+      </ul>
+    </section>
+
+    <section class="privacy-section">
+      <h2>3. What Cloud Data Is Stored</h2>
+      <p>Your Personal Cabinet data is stored in an isolated Cloudflare D1 database partitioned by your unique user ID:</p>
+      <ul>
+        <li>Tasks, subtasks, notes, completion comments, priorities, scheduled times, and focus time logged.</li>
+        <li>Daily routines, reflection entries (mood ratings, intentions, notes), and active focus timer state for cross-device sync.</li>
+        <li>Workspace preferences (theme, daily goals, timezone, reminder schedule).</li>
+      </ul>
+    </section>
+
+    <section class="privacy-section">
+      <h2>4. Optional Telegram Integration</h2>
+      <p>If you choose to link <code class="kbd">@myown_workflowbot</code> inside Personal Cabinet, we store your Telegram chat ID and username solely to send your requested agendas, scheduled task reminders, focus completion alerts, weekly Sunday scorecards, and interactive updates for your own tasks. You can tap <strong>Unlink</strong> inside Personal Cabinet at any time to stop all Telegram messages immediately.</p>
+    </section>
+
+    <section class="privacy-section">
+      <h2>5. Export &amp; Permanent Account Deletion</h2>
+      <p>Your data belongs exclusively to you. You never share data with other users, advertisers, or third-party brokers.</p>
+      <div class="privacy-callout">
+        <p><strong>Self-serve export &amp; deletion:</strong> Export all tasks and settings anytime as JSON or CSV in <strong>Settings</strong>. To permanently erase everything from our servers, open <strong>Personal Cabinet &rarr; Google Account &amp; Sync &rarr; Delete Account &amp; All Cloud Data</strong>. All tasks, routines, reflections, timer records, settings, Telegram pairing state, and user profile rows are deleted immediately from Cloudflare D1.</p>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

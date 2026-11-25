@@ -14,6 +14,9 @@ CREATE TABLE IF NOT EXISTS users (
   evening_reminder_hour INTEGER DEFAULT 21,
   last_morning_sent_date TEXT,
   last_evening_sent_date TEXT,
+  last_weekly_sent_date TEXT,
+  active_timer_json TEXT,
+  timer_notified_for TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -44,6 +47,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   status TEXT DEFAULT 'todo',
   subtasks_json TEXT DEFAULT '[]',
   routine_id TEXT,
+  completion_comment TEXT DEFAULT '',
+  alert_sent_for TEXT,
   sort_order INTEGER DEFAULT 0,
   created_at TEXT NOT NULL,
   completed_at TEXT

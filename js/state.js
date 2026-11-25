@@ -13,6 +13,8 @@
   var VALID_PRIORITIES = ['high', 'medium', 'low'];
   var VALID_CATEGORIES = ['work', 'health', 'learning', 'personal', 'admin'];
   var VALID_STATUSES = ['todo', 'in_progress', 'done'];
+  var VALID_TIMER_MODES = ['pomodoro', 'deep', 'break', 'stopwatch'];
+  var VALID_TIMER_STATUSES = ['idle', 'running', 'paused', 'completed'];
   var VALID_SORTS = ['manual', 'priority', 'time', 'scheduledTime', 'duration', 'estimatedMinutes'];
   var VALID_FILTER_STATUSES = ['all', 'active', 'todo', 'in_progress', 'done'];
 
@@ -199,6 +201,7 @@
       id: typeof raw.id === 'string' && raw.id ? raw.id : uid('task'),
       title: title,
       notes: typeof raw.notes === 'string' ? raw.notes : '',
+      completionComment: typeof raw.completionComment === 'string' ? raw.completionComment.slice(0, 2000) : '',
       date: date,
       timeBlock: VALID_TIME_BLOCKS.indexOf(raw.timeBlock) !== -1 ? raw.timeBlock : 'anytime',
       scheduledTime: normalizeTime(raw.scheduledTime),
@@ -214,6 +217,24 @@
       completedAt: status === 'done'
         ? (typeof raw.completedAt === 'string' && raw.completedAt ? raw.completedAt : nowIso)
         : null
+    };
+  }
+
+  function normalizeActiveTimer(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    var mode = VALID_TIMER_MODES.indexOf(raw.mode) !== -1 ? raw.mode : 'pomodoro';
+    var status = VALID_TIMER_STATUSES.indexOf(raw.status) !== -1 ? raw.status : 'idle';
+    var defaultDur = mode === 'pomodoro' ? 1500 : (mode === 'deep' ? 3000 : (mode === 'break' ? 300 : 0));
+    return {
+      mode: mode,
+      status: status,
+      durationSeconds: clamp(raw.durationSeconds !== undefined ? raw.durationSeconds : defaultDur, 0, 14400),
+      startedAtMs: Number.isFinite(Number(raw.startedAtMs)) ? Math.max(0, Math.round(Number(raw.startedAtMs))) : 0,
+      elapsedBeforePauseSeconds: clamp(raw.elapsedBeforePauseSeconds !== undefined ? raw.elapsedBeforePauseSeconds : 0, 0, 86400),
+      attachedTaskId: typeof raw.attachedTaskId === 'string' && raw.attachedTaskId.trim()
+        ? raw.attachedTaskId.trim().slice(0, 128)
+        : null,
+      updatedAt: typeof raw.updatedAt === 'string' && raw.updatedAt ? raw.updatedAt : new Date().toISOString()
     };
   }
 
@@ -889,6 +910,7 @@
       activeView: VALID_VIEWS.indexOf(parsed.activeView) !== -1 ? parsed.activeView : 'today',
       theme: VALID_THEMES.indexOf(parsed.theme) !== -1 ? parsed.theme : 'light',
       settings: normalizeSettings(parsed.settings),
+      activeTimer: normalizeActiveTimer(parsed.activeTimer),
       tasks: tasks,
       routines: routines,
       reflections: reflections,
@@ -918,6 +940,16 @@
     }
   }
 
+  function removeStorageKey(key) {
+    try {
+      if (global.localStorage) {
+        global.localStorage.removeItem(key);
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
   function loadInitialGuestState() {
     var parsed = readStorageKey(GUEST_STORAGE_KEY);
     if (!parsed) {
@@ -937,12 +969,17 @@
       activeView: state.activeView,
       theme: state.theme,
       settings: Object.assign({}, state.settings),
+      activeTimer: state.activeTimer ? Object.assign({}, state.activeTimer) : null,
       tasks: state.tasks,
       routines: state.routines,
       reflections: state.reflections,
       filters: Object.assign({}, state.filters),
       isSampleData: state.isSampleData
     };
+  }
+
+  function getActiveTimer() {
+    return state.activeTimer ? Object.assign({}, state.activeTimer) : null;
   }
 
   function getAuthState() {
@@ -994,6 +1031,7 @@
         id: t.id,
         title: t.title,
         notes: t.notes || '',
+        completionComment: t.completionComment || '',
         date: t.date,
         timeBlock: t.timeBlock || 'anytime',
         scheduledTime: t.scheduledTime || '',
@@ -1055,6 +1093,7 @@
       } : null,
       theme: resolvedTheme,
       settings: normalizeSettings(wsData.settings),
+      activeTimer: normalizeActiveTimer(wsData.activeTimer),
       tasks: tasks,
       routines: routines,
       reflections: reflections
@@ -1114,6 +1153,7 @@
       activeView: state.activeView,
       theme: resolvedTheme,
       settings: ws.settings || state.settings,
+      activeTimer: ws.activeTimer !== undefined ? ws.activeTimer : state.activeTimer,
       tasks: Array.isArray(ws.tasks) ? ws.tasks : state.tasks,
       routines: Array.isArray(ws.routines) ? ws.routines : state.routines,
       reflections: ws.reflections || state.reflections,
@@ -1129,6 +1169,7 @@
     state.routines = reconciled.routines;
     state.reflections = reconciled.reflections;
     state.settings = reconciled.settings;
+    state.activeTimer = reconciled.activeTimer;
     state.isSampleData = false;
     saveThemeKey(state.theme);
     commit('workspaceSync');
@@ -1448,6 +1489,7 @@
       activeView: opts.preserveUi ? prevView : (prevView || (cached && cached.activeView) || 'today'),
       theme: resolvedTheme,
       settings: wsSettings,
+      activeTimer: ws.activeTimer !== undefined ? ws.activeTimer : (cached && cached.activeTimer) || null,
       tasks: Array.isArray(ws.tasks) ? ws.tasks : ((cached && cached.tasks) || []),
       routines: Array.isArray(ws.routines) ? ws.routines : ((cached && cached.routines) || []),
       reflections: ws.reflections || (cached && cached.reflections) || {},
@@ -1522,6 +1564,7 @@
           ? ws.settings.theme
           : state.theme,
         settings: ws.settings || state.settings,
+        activeTimer: ws.activeTimer !== undefined ? ws.activeTimer : null,
         tasks: Array.isArray(ws.tasks) ? ws.tasks : [],
         routines: Array.isArray(ws.routines) ? ws.routines : [],
         reflections: ws.reflections || {},
@@ -1588,6 +1631,42 @@
     if (!authState.user || !partial || typeof partial !== 'object') return;
     authState.user = normalizeUser(Object.assign({}, authState.user, partial));
     notifyListeners('sync');
+  }
+
+  function syncActiveTimer(timerPayload) {
+    var nextTimer = normalizeActiveTimer(timerPayload);
+    state.activeTimer = nextTimer;
+    if (currentStorageKey) {
+      saveToStorage(currentStorageKey, state);
+    }
+    if (isCloudActive() && nextTimer) {
+      queueCloudOps({
+        path: '/api/timer',
+        method: 'PUT',
+        body: nextTimer
+      });
+    }
+    return nextTimer ? Object.assign({}, nextTimer) : null;
+  }
+
+  function deleteAccount() {
+    if (!isCloudActive() || typeof global.fetch !== 'function') {
+      return Promise.resolve({ ok: false, error: 'Sign in with Google first to delete your cloud account.' });
+    }
+    var userId = authState.user.id;
+    clearOutboxRetry();
+    saveOutbox(userId, []);
+    pendingSyncOps = 0;
+
+    return apiRequest('/api/account', 'DELETE').then(function () {
+      removeStorageKey(CLOUD_CACHE_PREFIX + userId);
+      removeStorageKey(OUTBOX_PREFIX + userId);
+      removeStorageKey(GUEST_STORAGE_KEY);
+      setGuestMode();
+      return { ok: true };
+    }).catch(function (err) {
+      return { ok: false, error: err && err.message ? err.message : 'Failed to delete account' };
+    });
   }
 
   function getLocalGuestSummary() {
@@ -1879,6 +1958,7 @@
       body: {
         title: taskObj.title,
         notes: taskObj.notes,
+        completionComment: taskObj.completionComment || '',
         date: taskObj.date,
         timeBlock: taskObj.timeBlock,
         scheduledTime: taskObj.scheduledTime,
@@ -2532,7 +2612,7 @@
     var headers = [
       'id', 'date', 'title', 'status', 'priority', 'category',
       'timeBlock', 'scheduledTime', 'estimatedMinutes', 'actualMinutes',
-      'subtasksDone', 'subtasksTotal', 'routineId', 'completedAt', 'notes'
+      'subtasksDone', 'subtasksTotal', 'routineId', 'completedAt', 'notes', 'completionComment'
     ];
     var rows = [headers.join(',')];
     var sorted = state.tasks.slice().sort(function (a, b) {
@@ -2545,7 +2625,7 @@
       rows.push([
         t.id, t.date, t.title, t.status, t.priority, t.category,
         t.timeBlock, t.scheduledTime, t.estimatedMinutes, t.actualMinutes,
-        subsDone, t.subtasks.length, t.routineId || '', t.completedAt || '', t.notes
+        subsDone, t.subtasks.length, t.routineId || '', t.completedAt || '', t.notes, t.completionComment || ''
       ].map(csvCell).join(','));
     });
 
@@ -2879,6 +2959,9 @@
     getPendingOutboxCount: getPendingOutboxCount,
     setGuestMode: setGuestMode,
     updateUserProfile: updateUserProfile,
+    getActiveTimer: getActiveTimer,
+    syncActiveTimer: syncActiveTimer,
+    deleteAccount: deleteAccount,
     getAuthState: getAuthState,
     getSyncState: getSyncState,
     hasLocalGuestTasks: hasLocalGuestTasks,

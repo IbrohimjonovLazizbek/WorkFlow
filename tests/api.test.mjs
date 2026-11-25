@@ -673,7 +673,13 @@ describe('Telegram pairing, webhook commands, Mini App auth & Cron Worker', () =
       });
       const addedCardMsg = sentMessages[sentMessages.length - 1];
       assert.match(addedCardMsg.text, /Plan sprint backlog/);
-      const highBtn = addedCardMsg.reply_markup?.inline_keyboard?.[0]?.[0];
+      const tomorrowBtn = addedCardMsg.reply_markup?.inline_keyboard?.[0]?.[1];
+      assert.match(tomorrowBtn.callback_data, /^td:.*:tomorrow$/);
+      const todayBoxBtn = addedCardMsg.reply_markup?.inline_keyboard?.[0]?.[0];
+      assert.match(todayBoxBtn.callback_data, /^td:.*:today$/);
+      const catHealthBtn = addedCardMsg.reply_markup?.inline_keyboard?.[1]?.[1];
+      assert.match(catHealthBtn.callback_data, /^cat:.*:health$/);
+      const highBtn = addedCardMsg.reply_markup?.inline_keyboard?.[2]?.[0];
       assert.match(highBtn.callback_data, /^tp:/);
 
       await call(env, 'POST', '/api/telegram/webhook', {
@@ -691,13 +697,52 @@ describe('Telegram pairing, webhook commands, Mini App auth & Cron Worker', () =
       assert.equal(editedMessages.length, 1);
       assert.match(editedMessages[0].text, /🔴 High/);
 
+      // Customize Category -> Health & Date -> Tomorrow -> Today via inline tap boxes
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: {
+          callback_query: {
+            id: 'cb_1b',
+            from: { id: 99887766 },
+            data: catHealthBtn.callback_data,
+            message: { message_id: 42, chat: { id: 99887766 }, reply_markup: addedCardMsg.reply_markup }
+          }
+        }
+      });
+      assert.match(editedMessages[editedMessages.length - 1].text, /💚 Health/);
+
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: {
+          callback_query: {
+            id: 'cb_1c',
+            from: { id: 99887766 },
+            data: tomorrowBtn.callback_data,
+            message: { message_id: 42, chat: { id: 99887766 }, reply_markup: addedCardMsg.reply_markup }
+          }
+        }
+      });
+      assert.match(editedMessages[editedMessages.length - 1].text, /\(Tomorrow\)/);
+
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: {
+          callback_query: {
+            id: 'cb_1d',
+            from: { id: 99887766 },
+            data: todayBoxBtn.callback_data,
+            message: { message_id: 42, chat: { id: 99887766 }, reply_markup: addedCardMsg.reply_markup }
+          }
+        }
+      });
+
       // Tap "📋 Today's Tasks" and toggle first task via inline button
       await call(env, 'POST', '/api/telegram/webhook', {
         headers: hookHeaders,
         body: { message: { chat: { id: 99887766 }, from: { id: 99887766 }, text: "📋 Today's Tasks" } }
       });
       const todayBoxMsg = sentMessages[sentMessages.length - 1];
-      const toggleBtn = todayBoxMsg.reply_markup?.inline_keyboard?.[0]?.[0];
+      const toggleBtn = todayBoxMsg.reply_markup?.inline_keyboard?.find((r) => String(r?.[0]?.text || '').includes('Plan sprint backlog'))?.[0];
       assert.match(toggleBtn.callback_data, /^t:/);
 
       await call(env, 'POST', '/api/telegram/webhook', {
@@ -711,8 +756,7 @@ describe('Telegram pairing, webhook commands, Mini App auth & Cron Worker', () =
           }
         }
       });
-      assert.equal(answeredCallbacks.length, 2);
-      assert.equal(editedMessages.length, 2);
+      assert.equal(editedMessages[editedMessages.length - 1].reply_markup?.inline_keyboard?.some((r) => r.some((b) => String(b.callback_data).startsWith('tc:'))), true);
 
       // Tap "⏰ Reminders" and adjust morning hour via inline box
       await call(env, 'POST', '/api/telegram/webhook', {
@@ -772,5 +816,274 @@ describe('Public & guard routes: method enforcement, unknown routes, DB check', 
     const cookieA = await seedUserWithCookie(env, { id: 'usr_M', googleSub: 'subM', email: 'm@x.com', name: 'M' });
     assert.equal((await call(env, 'GET', '/api/unknown', { headers: { Cookie: cookieA } })).status, 404);
     assert.equal((await call(env, 'GET', '/api/tasks', { headers: { Cookie: cookieA } })).status, 405);
+  });
+});
+
+describe('V2 Upgrades: completionComment, /api/timer, /api/account, Telegram routines/comments/snooze, Cron alerts & scorecard', () => {
+  test('completionComment CRUD, PUT /api/timer, and DELETE /api/account deletes only caller cabinet', async () => {
+    const env = makeEnv();
+    const cookieA = await seedUserWithCookie(env, {
+      id: 'usr_del_A',
+      googleSub: 'sub_del_A',
+      email: 'dela@example.com',
+      name: 'Del A',
+      timezone: 'Asia/Tashkent'
+    });
+    const cookieB = await seedUserWithCookie(env, {
+      id: 'usr_keep_B',
+      googleSub: 'sub_keep_B',
+      email: 'keepb@example.com',
+      name: 'Keep B',
+      timezone: 'Asia/Tashkent'
+    });
+
+    // Both users create tasks, routines, and reflections
+    await call(env, 'POST', '/api/tasks', {
+      headers: { Cookie: cookieA },
+      body: { id: 'task_a_del', title: 'Task A', date: '2026-11-25' }
+    });
+    await call(env, 'PATCH', '/api/tasks/task_a_del', {
+      headers: { Cookie: cookieA },
+      body: { status: 'done', completionComment: 'Wrapped up cleanly' }
+    });
+    await call(env, 'POST', '/api/tasks', {
+      headers: { Cookie: cookieB },
+      body: { id: 'task_b_keep', title: 'Task B Safe', date: '2026-11-25' }
+    });
+
+    const timerRes = await call(env, 'PUT', '/api/timer', {
+      headers: { Cookie: cookieA },
+      body: {
+        mode: 'deep',
+        status: 'running',
+        durationSeconds: 3000,
+        startedAtMs: 1795580000000,
+        elapsedBeforePauseSeconds: 60,
+        attachedTaskId: 'task_a_del',
+        updatedAt: '2026-11-25T10:00:00.000Z'
+      }
+    });
+    assert.equal(timerRes.status, 200);
+    assert.equal(timerRes.data.activeTimer.mode, 'deep');
+
+    const wsA = await call(env, 'GET', '/api/workspace', { headers: { Cookie: cookieA } });
+    assert.equal(wsA.data.tasks[0].completionComment, 'Wrapped up cleanly');
+    assert.equal(wsA.data.activeTimer.attachedTaskId, 'task_a_del');
+
+    // User A permanently deletes their account
+    const delRes = await call(env, 'DELETE', '/api/account', { headers: { Cookie: cookieA } });
+    assert.equal(delRes.status, 200);
+    assert.equal(delRes.data.ok, true);
+    assert.match(delRes.headers.get('set-cookie') || '', /tf_session=;/);
+
+    // User A is now unauthenticated and absent from D1; User B is completely untouched
+    const meA = await call(env, 'GET', '/api/auth/me', { headers: { Cookie: cookieA } });
+    assert.equal(meA.data.authenticated, false);
+    const aTasksCount = env.DB.sqlite.prepare('SELECT COUNT(*) AS c FROM tasks WHERE user_id = ?').get('usr_del_A').c;
+    assert.equal(aTasksCount, 0);
+
+    const wsB = await call(env, 'GET', '/api/workspace', { headers: { Cookie: cookieB } });
+    assert.equal(wsB.status, 200);
+    assert.equal(wsB.data.tasks.length, 1);
+    assert.equal(wsB.data.tasks[0].id, 'task_b_keep');
+  });
+
+  test('Telegram Routines box, Done Comment flow, /done N comment, Snooze +1h, and Cron alerts + Sunday Scorecard + Timer Ping', async () => {
+    const env = makeEnv({
+      TELEGRAM_BOT_TOKEN: 'bot_token_test',
+      TELEGRAM_WEBHOOK_SECRET: 'tg_webhook_secret_test'
+    });
+    const cookieU = await seedUserWithCookie(env, {
+      id: 'usr_tg2',
+      googleSub: 'sub_tg2',
+      email: 'tg2@example.com',
+      name: 'Laz',
+      timezone: 'Asia/Tashkent'
+    });
+
+    // Pair Telegram directly in DB for concise setup + create active routine
+    env.DB.sqlite.prepare(
+      'UPDATE users SET telegram_chat_id = ?, telegram_username = ?, telegram_notifications_enabled = 1 WHERE id = ?'
+    ).run('55443322', 'laz_tg', 'usr_tg2');
+
+    await call(env, 'POST', '/api/routines', {
+      headers: { Cookie: cookieU },
+      body: {
+        id: 'rtn_morning_run',
+        title: 'Morning Walk',
+        category: 'health',
+        priority: 'medium',
+        timeBlock: 'morning',
+        estimatedMinutes: 25,
+        schedule: 'daily',
+        active: true
+      }
+    });
+
+    // Determine user local time and date at fixed Sunday evening instant
+    // 2026-11-29 is Sunday; 16:00 UTC == 21:00 Asia/Tashkent (eveningReminderHour = 21)
+    const sundayEvening = new Date('2026-11-29T16:00:00.000Z');
+    const localInfo = getLocalDateAndHour(sundayEvening, 'Asia/Tashkent');
+    assert.equal(localInfo.weekday, 'Sun');
+    assert.equal(localInfo.dateKey, '2026-11-29');
+    assert.equal(localInfo.hour, 21);
+
+    // Create a task scheduled at 21:05 today (within +10m cron alert window!) + reflection for weekly scorecard
+    await call(env, 'POST', '/api/tasks', {
+      headers: { Cookie: cookieU },
+      body: {
+        id: 'task_sched_alert',
+        title: 'Submit weekly deck',
+        date: '2026-11-29',
+        scheduledTime: '21:05',
+        estimatedMinutes: 30,
+        priority: 'high',
+        category: 'work',
+        status: 'todo'
+      }
+    });
+    await call(env, 'PUT', '/api/reflections/2026-11-29', {
+      headers: { Cookie: cookieU },
+      body: { mood: 5, intention: 'Finish strong', reflection: 'Solid week' }
+    });
+    // Running timer that already reached duration (started 30m ago, 25m duration)
+    await call(env, 'PUT', '/api/timer', {
+      headers: { Cookie: cookieU },
+      body: {
+        mode: 'pomodoro',
+        status: 'running',
+        durationSeconds: 1500,
+        startedAtMs: sundayEvening.getTime() - 1600 * 1000,
+        elapsedBeforePauseSeconds: 0,
+        attachedTaskId: 'task_sched_alert',
+        updatedAt: '2026-11-29T15:35:00.000Z'
+      }
+    });
+
+    const sent = [];
+    const edited = [];
+    const answered = [];
+    const restore = mockFetch(async (url, opts = {}) => {
+      const u = String(url);
+      const body = opts.body ? JSON.parse(opts.body) : {};
+      const jsonOk = (payload) => new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (u.includes('api.telegram.org')) {
+        if (u.endsWith('/sendMessage')) {
+          sent.push(body);
+          return jsonOk({ ok: true, result: { message_id: 500 + sent.length } });
+        }
+        if (u.endsWith('/editMessageText')) {
+          edited.push(body);
+          return jsonOk({ ok: true, result: true });
+        }
+        if (u.endsWith('/answerCallbackQuery')) {
+          answered.push(body);
+          return jsonOk({ ok: true, result: true });
+        }
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    try {
+      // 1. Run cron tick at Sunday 21:00 -> fires Evening Wrap-up, Sunday Weekly Scorecard, Scheduled Task Alert, and Timer Complete ping!
+      const stats1 = await runHourlyBriefings(env, sundayEvening);
+      assert.equal(stats1.sentEvening, 1);
+      assert.equal(stats1.sentWeekly, 1);
+      assert.equal(stats1.sentTaskAlerts, 1);
+      assert.equal(stats1.sentTimerAlerts, 1);
+      assert.equal(sent.some((m) => /Weekly Scorecard/.test(m.text)), true);
+      assert.equal(sent.some((m) => /Focus Sprint Complete/.test(m.text) && /Submit weekly deck/.test(m.text)), true);
+      const alertMsg = sent.find((m) => /Scheduled Task/.test(m.text));
+      assert.ok(alertMsg);
+      const snoozeBtn = alertMsg.reply_markup?.inline_keyboard?.[0]?.find((b) => String(b.callback_data).startsWith('ts:'));
+      assert.ok(snoozeBtn);
+
+      // Re-running cron 2 minutes later deduplicates all four alerts
+      const stats2 = await runHourlyBriefings(env, new Date(sundayEvening.getTime() + 120 * 1000));
+      assert.equal(stats2.sentEvening, 0);
+      assert.equal(stats2.sentWeekly, 0);
+      assert.equal(stats2.sentTaskAlerts, 0);
+      assert.equal(stats2.sentTimerAlerts, 0);
+
+      const hookHeaders = { 'x-telegram-bot-api-secret-token': 'tg_webhook_secret_test' };
+
+      // 2. Tap Snooze +1h on scheduled task alert -> shifts 21:05 -> 22:05 and clears alert_sent_for
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: {
+          callback_query: {
+            id: 'cb_snooze',
+            from: { id: 55443322 },
+            data: snoozeBtn.callback_data,
+            message: { message_id: 601, chat: { id: 55443322 }, reply_markup: alertMsg.reply_markup }
+          }
+        }
+      });
+      const snoozedRow = env.DB.sqlite.prepare('SELECT scheduled_time, alert_sent_for FROM tasks WHERE id = ?').get('task_sched_alert');
+      assert.equal(snoozedRow.scheduled_time, '22:05');
+      assert.equal(snoozedRow.alert_sent_for, null);
+
+      // 3. Tap tc: to attach a completion comment interactively via reply
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: {
+          callback_query: {
+            id: 'cb_tc',
+            from: { id: 55443322 },
+            data: 'tc:task_sched_alert',
+            message: { message_id: 602, chat: { id: 55443322 }, reply_markup: alertMsg.reply_markup }
+          }
+        }
+      });
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: { message: { chat: { id: 55443322 }, from: { id: 55443322 }, text: 'Emailed deck to leadership' } }
+      });
+      const commentedRow = env.DB.sqlite.prepare('SELECT completion_comment FROM tasks WHERE id = ?').get('task_sched_alert');
+      assert.equal(commentedRow.completion_comment, 'Emailed deck to leadership');
+
+      // 4. Tap "🔄 Routines" box and check off routine directly via rt:<id>
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: { message: { chat: { id: 55443322 }, from: { id: 55443322 }, text: '🔄 Routines' } }
+      });
+      const routinesMsg = sent[sent.length - 1];
+      const rtnBtn = routinesMsg.reply_markup?.inline_keyboard?.flat().find((b) => b.callback_data === 'rt:rtn_morning_run');
+      assert.ok(rtnBtn);
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: {
+          callback_query: {
+            id: 'cb_rt',
+            from: { id: 55443322 },
+            data: rtnBtn.callback_data,
+            message: { message_id: 603, chat: { id: 55443322 }, reply_markup: routinesMsg.reply_markup }
+          }
+        }
+      });
+      const createdRoutineTask = env.DB.sqlite.prepare('SELECT title, status, routine_id FROM tasks WHERE user_id = ? AND routine_id = ?')
+        .get('usr_tg2', 'rtn_morning_run');
+      assert.ok(createdRoutineTask);
+      assert.equal(createdRoutineTask.status, 'done');
+
+      // 5. /done 1 <comment> marks task done and saves inline comment
+      const { dateKey: todayKey } = getLocalDateAndHour(new Date(), 'Asia/Tashkent');
+      await call(env, 'POST', '/api/tasks', {
+        headers: { Cookie: cookieU },
+        body: { id: 'task_cli_done', title: 'CLI Done Task', date: todayKey, status: 'todo' }
+      });
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: { message: { chat: { id: 55443322 }, from: { id: 55443322 }, text: '/done 1 Finished before lunch' } }
+      });
+      const todayRows = env.DB.sqlite.prepare('SELECT status, completion_comment FROM tasks WHERE user_id = ? AND date = ? ORDER BY sort_order ASC, created_at ASC')
+        .all('usr_tg2', todayKey);
+      assert.equal(todayRows.some((r) => r.status === 'done' && r.completion_comment === 'Finished before lunch'), true);
+    } finally {
+      restore();
+    }
   });
 });

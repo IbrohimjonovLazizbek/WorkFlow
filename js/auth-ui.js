@@ -41,6 +41,7 @@
     authError: null,
     telegramHint: null,
     pairingData: null, // { code, botUsername, deepLink, expiresAt }
+    confirmDeleteAccount: false,
     busyAction: null
   };
 
@@ -347,6 +348,29 @@
             '</div>';
         }
 
+        var appRef = getApp();
+        var canInstallPwa = Boolean(appRef && typeof appRef.canInstallPWA === 'function' && appRef.canInstallPWA());
+        var dangerZoneHtml = uiState.confirmDeleteAccount
+          ? '<div class="cabinet-danger-zone">' +
+              '<div class="cabinet-danger-header">' +
+                '<strong>Permanently delete your account &amp; all cloud data?</strong>' +
+                '<span>This immediately deletes your tasks, comments, routines, reflections, focus state, and Telegram pairing from Cloudflare D1. This cannot be undone.</span>' +
+              '</div>' +
+              '<div class="cabinet-danger-actions">' +
+                '<button type="button" class="btn btn-danger btn-sm" data-cabinet-action="delete-account-confirm"' + (uiState.busyAction ? ' disabled' : '') + '>' + (uiState.busyAction === 'delete-account' ? 'Deleting...' : 'Confirm Permanent Delete') + '</button>' +
+                '<button type="button" class="btn btn-secondary btn-sm" data-cabinet-action="delete-account-cancel"' + (uiState.busyAction ? ' disabled' : '') + '>Cancel</button>' +
+              '</div>' +
+            '</div>'
+          : '<div class="cabinet-danger-zone">' +
+              '<div class="cabinet-danger-header">' +
+                '<strong>Danger Zone</strong>' +
+                '<span>Remove your Personal Cabinet and erase all cloud records permanently.</span>' +
+              '</div>' +
+              '<div class="cabinet-danger-actions">' +
+                '<button type="button" class="btn btn-danger btn-sm" data-cabinet-action="delete-account-ask"' + (uiState.busyAction ? ' disabled' : '') + '>Delete Account &amp; All Cloud Data</button>' +
+              '</div>' +
+            '</div>';
+
         contentHtml =
           '<div class="cabinet-profile-card">' +
             '<div class="cabinet-profile-main">' +
@@ -366,8 +390,15 @@
           '<div style="display:flex;align-items:center;justify-content:flex-end;gap:var(--space-2);flex-wrap:wrap;">' +
             '<button type="button" class="btn btn-secondary btn-sm" data-cabinet-action="sync-now"' + (uiState.busyAction ? ' disabled' : '') + '>Sync Now</button>' +
             '<button type="button" class="btn btn-danger btn-sm" data-cabinet-action="sign-out"' + (uiState.busyAction ? ' disabled' : '') + '>Sign Out</button>' +
+          '</div>' +
+          dangerZoneHtml +
+          '<div class="cabinet-footer-row">' +
+            '<a class="privacy-inline-link" href="/privacy.html" target="_blank" rel="noopener noreferrer">Privacy Policy</a>' +
+            (canInstallPwa ? '<button type="button" class="btn btn-secondary btn-sm" data-cabinet-action="install-pwa">Install App</button>' : '<span>Private D1 Cabinet</span>') +
           '</div>';
       } else {
+        var guestAppRef = getApp();
+        var canInstallGuestPwa = Boolean(guestAppRef && typeof guestAppRef.canInstallPWA === 'function' && guestAppRef.canInstallPWA());
         contentHtml =
           '<div class="cabinet-profile-card">' +
             '<div class="cabinet-profile-main">' +
@@ -393,7 +424,11 @@
                 '</svg>' +
                 '<span>Sign in with Google</span>' +
               '</a>' +
-              (!status.googleConfigured ? renderSetupChecklist('google', origin) : ''));
+              (!status.googleConfigured ? renderSetupChecklist('google', origin) : '')) +
+          '<div class="cabinet-footer-row">' +
+            '<a class="privacy-inline-link" href="/privacy.html" target="_blank" rel="noopener noreferrer">Privacy Policy</a>' +
+            (canInstallGuestPwa ? '<button type="button" class="btn btn-secondary btn-sm" data-cabinet-action="install-pwa">Install App</button>' : '<span>Local Storage Mode</span>') +
+          '</div>';
       }
     } else {
       if (!auth.authenticated || !user) {
@@ -519,6 +554,7 @@
     }
     modal.hidden = false;
     uiState.modalOpen = true;
+    uiState.confirmDeleteAccount = false;
     renderCabinetModal();
   }
 
@@ -526,6 +562,7 @@
     var modal = $('cabinet-modal');
     if (modal) modal.hidden = true;
     uiState.modalOpen = false;
+    uiState.confirmDeleteAccount = false;
   }
 
   function isEditingActiveInput() {
@@ -721,6 +758,40 @@
       });
     } else if (action === 'tg-send-summary') {
       sendTodaySummaryToTelegram();
+    } else if (action === 'delete-account-ask') {
+      uiState.confirmDeleteAccount = true;
+      renderCabinetModal();
+    } else if (action === 'delete-account-cancel') {
+      uiState.confirmDeleteAccount = false;
+      renderCabinetModal();
+    } else if (action === 'delete-account-confirm') {
+      if (uiState.busyAction || typeof store.deleteAccount !== 'function') return;
+      uiState.busyAction = 'delete-account';
+      renderCabinetModal();
+      store.deleteAccount().then(function (res) {
+        uiState.busyAction = null;
+        uiState.confirmDeleteAccount = false;
+        if (res && res.ok) {
+          uiState.pairingData = null;
+          writeGuestFlag(false);
+          stopLiveSync();
+          closeCabinetModal();
+          if (TaskFlow.TasksUI && typeof TaskFlow.TasksUI.closeDrawer === 'function') {
+            TaskFlow.TasksUI.closeDrawer();
+          }
+          showAuthGate();
+          render();
+          toast('Your account and cloud data have been permanently deleted', { type: 'info' });
+        } else {
+          toast((res && res.error) || 'Could not delete account', { type: 'error' });
+          renderCabinetModal();
+        }
+      });
+    } else if (action === 'install-pwa') {
+      var appRef = getApp();
+      if (appRef && typeof appRef.triggerPWAInstall === 'function') {
+        appRef.triggerPWAInstall();
+      }
     }
   }
 
@@ -800,6 +871,7 @@
         var tabBtn = e.target.closest('[data-cabinet-tab]');
         if (tabBtn) {
           uiState.activeTab = tabBtn.getAttribute('data-cabinet-tab');
+          uiState.confirmDeleteAccount = false;
           renderCabinetModal();
           return;
         }

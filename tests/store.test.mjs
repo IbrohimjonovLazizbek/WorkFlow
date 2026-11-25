@@ -443,6 +443,7 @@ test('Export JSON/CSV and strict Import JSON validation', () => {
   Store.addTask({
     title: 'Quote "test", comma & newline',
     notes: 'Line 1\nLine 2',
+    completionComment: 'Reviewed and merged cleanly',
     date: today,
     priority: 'high',
     category: 'work'
@@ -452,8 +453,10 @@ test('Export JSON/CSV and strict Import JSON validation', () => {
   const exportedJson = Store.exportJSON();
   const csv = Store.exportCSV();
   assert.match(csv, /^id,date,title,status,/);
+  assert.match(csv, /completionComment/);
   assert.match(csv, /"Quote ""test"", comma & newline"/);
   assert.match(csv, /"Line 1\nLine 2"/);
+  assert.match(csv, /Reviewed and merged cleanly/);
 
   // Invalid imports rejected without mutating state
   assert.equal(Store.importJSON('').ok, false);
@@ -608,4 +611,101 @@ test('Cloud Sync: persistent outbox, keepalive, theme sync, reload flush, and li
   assert.equal(rDiff.changed, true);
   assert.equal(syncEvents.includes('workspaceSync'), true);
   assert.equal(rt2.TaskFlow.Store.getState().tasks.some((t) => t.id === 'task_from_tg'), true);
+});
+
+test('Timer Cross-Device Sync & deleteAccount clear cloud timer and storage cleanly', async () => {
+  const storage = createStorageMock();
+  const requests = [];
+  let lastServerTimer = null;
+
+  const mockFetch = async (url, opts = {}) => {
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    requests.push({ url: String(url), method: opts.method || 'GET', body });
+    if (String(url) === '/api/timer' && opts.method === 'PUT') {
+      lastServerTimer = body;
+      return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true, activeTimer: body }) };
+    }
+    if (String(url) === '/api/account' && opts.method === 'DELETE') {
+      return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }) };
+    }
+    return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }) };
+  };
+
+  const rt = loadTaskFlowRuntime({ files: ['js/state.js', 'js/timer.js'], storage, fetch: mockFetch });
+  const { Store, Timer, Utils } = rt.TaskFlow;
+  const userObj = { id: 'usr_timer_1', email: 'timer@example.com', name: 'Timer User', timezone: 'Asia/Tashkent' };
+  const attached = {
+    id: 'task_attach_1',
+    title: 'Deep Focus Task',
+    notes: '',
+    completionComment: '',
+    date: Utils.todayKey(),
+    timeBlock: 'morning',
+    scheduledTime: '',
+    estimatedMinutes: 50,
+    actualMinutes: 0,
+    priority: 'high',
+    category: 'work',
+    status: 'todo',
+    subtasks: [],
+    routineId: null,
+    order: 0,
+    createdAt: new Date().toISOString(),
+    completedAt: null
+  };
+
+  Store.setCloudWorkspace(userObj, {
+    user: userObj,
+    settings: { dailyGoalTasks: 5, dailyGoalMinutes: 120, soundEnabled: true, userName: 'Timer User', showCompleted: true, theme: 'light' },
+    activeTimer: null,
+    tasks: [attached],
+    routines: [],
+    reflections: {}
+  });
+
+  Timer.attachTask(attached.id);
+  Timer.start();
+  await new Promise((r) => setTimeout(r, 25));
+
+  assert.ok(lastServerTimer);
+  assert.equal(lastServerTimer.status, 'running');
+  assert.equal(lastServerTimer.attachedTaskId, attached.id);
+  assert.equal(requests.some((r) => r.url === '/api/timer' && r.method === 'PUT'), true);
+  Timer.pause();
+  await new Promise((r) => setTimeout(r, 15));
+
+  // Simulate another device starting a 50-minute deep sprint 120s ago
+  const remoteStartedMs = Date.now() - 120 * 1000;
+  Store.setCloudWorkspace(userObj, {
+    user: userObj,
+    settings: { dailyGoalTasks: 5, dailyGoalMinutes: 120, soundEnabled: true, userName: 'Timer User', showCompleted: true, theme: 'light' },
+    activeTimer: {
+      mode: 'deep',
+      status: 'running',
+      durationSeconds: 3000,
+      startedAtMs: remoteStartedMs,
+      elapsedBeforePauseSeconds: 0,
+      attachedTaskId: attached.id,
+      updatedAt: new Date(Date.now() + 10000).toISOString()
+    },
+    tasks: [attached],
+    routines: [],
+    reflections: {}
+  }, { preserveUi: true, reason: 'workspaceSync' });
+
+  const syncedState = Timer.getState();
+  assert.equal(syncedState.mode, 'deep');
+  assert.equal(syncedState.running, true);
+  assert.equal(syncedState.attachedTaskId, attached.id);
+  assert.ok(syncedState.elapsedSeconds >= 119 && syncedState.elapsedSeconds <= 122);
+  assert.ok(syncedState.remainingSeconds >= 2878 && syncedState.remainingSeconds <= 2881);
+  Timer.reset();
+
+  // Delete cloud account clears auth, cloud cache, and outbox
+  const delRes = await Store.deleteAccount();
+  assert.equal(delRes.ok, true);
+  assert.equal(Store.getAuthState().authenticated, false);
+  assert.equal(storage.getItem('taskflow_cloud_cache_v1_usr_timer_1'), null);
+  assert.equal(storage.getItem('taskflow_outbox_v1_usr_timer_1'), null);
+  assert.equal(requests.some((r) => r.url === '/api/account' && r.method === 'DELETE'), true);
 });

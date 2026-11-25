@@ -16,6 +16,7 @@
   var paletteItems = [];
   var lastRenderedTheme = null;
   var timerRefs = null;
+  var deferredInstallPrompt = null;
   var initialized = false;
 
   function $(id) {
@@ -460,7 +461,7 @@
    * Modals: Command Palette, Settings, Shortcuts, Cabinet
    * ========================================================================= */
   function closeModals() {
-    var ids = ['command-palette-modal', 'settings-modal', 'shortcuts-modal', 'cabinet-modal'];
+    var ids = ['command-palette-modal', 'settings-modal', 'shortcuts-modal', 'cabinet-modal', 'completion-comment-modal'];
     ids.forEach(function (id) {
       var el = $(id);
       if (el) el.hidden = true;
@@ -847,7 +848,8 @@
   function hasAnyOpenModal() {
     if (activeModalId) return true;
     var cab = $('cabinet-modal');
-    return Boolean(cab && !cab.hidden);
+    var ccm = $('completion-comment-modal');
+    return Boolean((cab && !cab.hidden) || (ccm && !ccm.hidden));
   }
 
   function bindGlobalEvents() {
@@ -1171,6 +1173,69 @@
     });
   }
 
+  function updateInstallButtons() {
+    var canInstall = Boolean(deferredInstallPrompt);
+    var gateBtn = $('btn-install-pwa-gate');
+    if (gateBtn) {
+      gateBtn.hidden = !canInstall;
+    }
+    if (TaskFlow.AuthUI && typeof TaskFlow.AuthUI.render === 'function') {
+      TaskFlow.AuthUI.render();
+    }
+  }
+
+  function canInstallPWA() {
+    return Boolean(deferredInstallPrompt);
+  }
+
+  function triggerPWAInstall() {
+    if (!deferredInstallPrompt) return Promise.resolve(false);
+    var promptEvent = deferredInstallPrompt;
+    deferredInstallPrompt = null;
+    updateInstallButtons();
+    try {
+      var res = promptEvent.prompt();
+      if (res && typeof res.then === 'function') {
+        return res.then(function () { return true; }).catch(function () { return false; });
+      }
+      if (promptEvent.userChoice && typeof promptEvent.userChoice.then === 'function') {
+        return promptEvent.userChoice.then(function (choice) {
+          return Boolean(choice && choice.outcome === 'accepted');
+        }).catch(function () { return false; });
+      }
+    } catch (e) {
+      return Promise.resolve(false);
+    }
+    return Promise.resolve(true);
+  }
+
+  function initPWA() {
+    if (!global.location || global.location.protocol === 'file:') return;
+    if (global.navigator && 'serviceWorker' in global.navigator && global.navigator.serviceWorker && typeof global.navigator.serviceWorker.register === 'function') {
+      global.navigator.serviceWorker.register('/sw.js').catch(function () {
+        /* ignore SW registration failure in unsupported contexts */
+      });
+    }
+    if (global.addEventListener) {
+      global.addEventListener('beforeinstallprompt', function (e) {
+        if (e && typeof e.preventDefault === 'function') e.preventDefault();
+        deferredInstallPrompt = e;
+        updateInstallButtons();
+      });
+      global.addEventListener('appinstalled', function () {
+        deferredInstallPrompt = null;
+        updateInstallButtons();
+        showToast('TaskFlow installed as an app', { type: 'success' });
+      });
+    }
+    var gateInstallBtn = $('btn-install-pwa-gate');
+    if (gateInstallBtn) {
+      gateInstallBtn.addEventListener('click', function () {
+        triggerPWAInstall();
+      });
+    }
+  }
+
   function init() {
     if (initialized) return;
     initialized = true;
@@ -1184,6 +1249,7 @@
 
     initHeaderTimerWidget();
     bindGlobalEvents();
+    initPWA();
 
     if (TaskFlow.TasksUI && typeof TaskFlow.TasksUI.init === 'function') {
       TaskFlow.TasksUI.init();
@@ -1222,7 +1288,9 @@
     openCommandPalette: openCommandPalette,
     closeModals: closeModals,
     toggleTheme: toggleTheme,
-    downloadFile: downloadFile
+    downloadFile: downloadFile,
+    canInstallPWA: canInstallPWA,
+    triggerPWAInstall: triggerPWAInstall
   };
 
   if (global.document) {

@@ -38,6 +38,7 @@
   var uiState = {
     initialized: false,
     openDrawerId: null,
+    commentModalTaskId: null,
     editingTaskId: null,
     dragTaskId: null,
     dismissedRolloverDate: null,
@@ -646,6 +647,13 @@
 
     var focusLabel = isRunning ? 'Pause Focus' : 'Start Focus';
 
+    var commentHtml = task.completionComment && task.completionComment.trim()
+      ? '<div class="task-completion-comment" title="' + esc(task.completionComment.slice(0, 200)) + '">' +
+          '<span class="task-comment-icon" aria-hidden="true">💬</span>' +
+          '<span class="task-comment-text">' + esc(task.completionComment.trim()) + '</span>' +
+        '</div>'
+      : '';
+
     return (
       '<div class="' + cardClasses.join(' ') + '" data-task-id="' + esc(task.id) + '" draggable="' + (allowReorder ? 'true' : 'false') + '">' +
         dragHandle +
@@ -668,6 +676,7 @@
             subtaskBadge +
             routineTag +
           '</div>' +
+          commentHtml +
         '</div>' +
         '<div class="task-actions">' +
           '<button type="button" class="btn btn-icon btn-ghost btn-sm' + (isRunning ? ' is-active' : '') + '" data-action="focus-task" title="' + esc(focusLabel) + '" aria-label="' + esc(focusLabel) + '">' +
@@ -955,6 +964,10 @@
           '<label class="form-label" for="drawer-notes">Notes</label>' +
           '<textarea id="drawer-notes" class="form-textarea" rows="4" data-field="notes" placeholder="Context, links, acceptance criteria...">' + esc(task.notes || '') + '</textarea>' +
         '</div>' +
+        '<div class="form-group">' +
+          '<label class="form-label" for="drawer-completion-comment">Completion Comment</label>' +
+          '<textarea id="drawer-completion-comment" class="form-textarea" rows="3" maxlength="2000" data-field="completionComment" placeholder="Outcome, link, or wrap-up note when marked done...">' + esc(task.completionComment || '') + '</textarea>' +
+        '</div>' +
       '</div>' +
       '<div class="drawer-footer">' +
         '<button type="button" class="btn btn-primary btn-sm" data-action="drawer-focus">' + (running ? 'Pause Focus' : 'Focus on this task') + '</button>' +
@@ -1126,6 +1139,7 @@
     if (!pendingDrawerEdit && uiState.openDrawerId) {
       var titleEl = document.getElementById('drawer-title');
       var notesEl = document.getElementById('drawer-notes');
+      var commentEl = document.getElementById('drawer-completion-comment');
       var store = getStore();
       var task = (store.getState().tasks || []).find(function (t) { return t.id === uiState.openDrawerId; });
       if (task) {
@@ -1135,6 +1149,9 @@
         }
         if (notesEl && notesEl.value !== (task.notes || '')) {
           patch.notes = notesEl.value;
+        }
+        if (commentEl && commentEl.value !== (task.completionComment || '')) {
+          patch.completionComment = commentEl.value.slice(0, 2000);
         }
         if (Object.keys(patch).length > 0) {
           store.updateTask(task.id, patch);
@@ -1160,6 +1177,31 @@
     }
     if (backdrop) {
       backdrop.hidden = true;
+    }
+  }
+
+  function closeCompletionCommentModal() {
+    uiState.commentModalTaskId = null;
+    var modal = document.getElementById('completion-comment-modal');
+    if (modal) modal.hidden = true;
+  }
+
+  function openCompletionCommentModal(taskId) {
+    if (!taskId) return;
+    var task = (getStore().getState().tasks || []).find(function (t) { return t.id === taskId; });
+    if (!task) return;
+    var modal = document.getElementById('completion-comment-modal');
+    if (!modal) return;
+    uiState.commentModalTaskId = taskId;
+    var labelEl = document.getElementById('completion-comment-task-label');
+    if (labelEl) labelEl.textContent = task.title || '';
+    var input = document.getElementById('completion-comment-input');
+    if (input) input.value = task.completionComment || '';
+    modal.hidden = false;
+    if (input) {
+      window.setTimeout(function () {
+        input.focus();
+      }, 20);
     }
   }
 
@@ -1277,6 +1319,7 @@
         if (taskId) {
           store.toggleTaskDone(taskId);
           triggerChime('check');
+          openCompletionCommentModal(taskId);
         }
         return true;
       case 'toggle-rollover-review':
@@ -1340,6 +1383,7 @@
           if (before && before.status !== 'done') {
             triggerChime('check');
             announce('Completed ' + before.title);
+            openCompletionCommentModal(taskId);
           }
         }
         return true;
@@ -1351,6 +1395,8 @@
             store.updateTask(taskId, { status: next });
             if (next === 'done') {
               triggerChime('check');
+              announce('Completed ' + current.title);
+              openCompletionCommentModal(taskId);
             }
           }
         }
@@ -1747,7 +1793,7 @@
 
       drawer.addEventListener('input', function (e) {
         var field = e.target && e.target.getAttribute('data-field');
-        if ((field !== 'notes' && field !== 'title') || !uiState.openDrawerId) {
+        if ((field !== 'notes' && field !== 'title' && field !== 'completionComment') || !uiState.openDrawerId) {
           return;
         }
         var id = uiState.openDrawerId;
@@ -1759,6 +1805,8 @@
             return;
           }
           patch.title = trimmed;
+        } else if (field === 'completionComment') {
+          patch.completionComment = val.slice(0, 2000);
         } else {
           patch.notes = val;
         }
@@ -1776,7 +1824,7 @@
 
       drawer.addEventListener('focusout', function (e) {
         var field = e.target && e.target.getAttribute('data-field');
-        if (field === 'notes' || field === 'title') {
+        if (field === 'notes' || field === 'title' || field === 'completionComment') {
           flushDrawerEdits();
         }
       });
@@ -1787,6 +1835,47 @@
           flushDrawerEdits();
         }
       });
+    }
+
+    var commentModal = document.getElementById('completion-comment-modal');
+    if (commentModal) {
+      commentModal.addEventListener('click', function (e) {
+        var chip = e.target.closest('[data-comment-chip]');
+        if (!chip) return;
+        var input = document.getElementById('completion-comment-input');
+        if (input) {
+          input.value = chip.getAttribute('data-comment-chip') || '';
+          input.focus();
+        }
+      });
+
+      var commentInput = document.getElementById('completion-comment-input');
+      if (commentInput) {
+        commentInput.addEventListener('keydown', function (e) {
+          if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+            e.preventDefault();
+            var form = document.getElementById('completion-comment-form');
+            if (form) form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+          }
+        });
+      }
+
+      var commentForm = document.getElementById('completion-comment-form');
+      if (commentForm) {
+        commentForm.addEventListener('submit', function (e) {
+          e.preventDefault();
+          var targetId = uiState.commentModalTaskId;
+          var input = document.getElementById('completion-comment-input');
+          var val = input ? input.value.trim().slice(0, 2000) : '';
+          closeCompletionCommentModal();
+          if (targetId) {
+            getStore().updateTask(targetId, { completionComment: val });
+            if (val) {
+              notifyToast('Completion comment saved', { type: 'success' });
+            }
+          }
+        });
+      }
     }
   }
 

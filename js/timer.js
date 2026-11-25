@@ -26,6 +26,7 @@
   var intervalId = null;
   var runStartedAtMs = 0;
   var accumulatedElapsedMs = 0;
+  var lastCloudUpdatedAt = '';
   var listeners = [];
   var audioCtx = null;
 
@@ -178,6 +179,120 @@
     };
   }
 
+  function syncTimerToStore() {
+    var store = getStore();
+    if (!store || typeof store.syncActiveTimer !== 'function') return;
+    var nowIso = new Date().toISOString();
+    if (lastCloudUpdatedAt && nowIso <= lastCloudUpdatedAt) {
+      var parsed = Date.parse(lastCloudUpdatedAt);
+      if (Number.isFinite(parsed)) {
+        nowIso = new Date(parsed + 1).toISOString();
+      }
+    }
+    lastCloudUpdatedAt = nowIso;
+    store.syncActiveTimer({
+      mode: timerState.mode,
+      status: timerState.status,
+      durationSeconds: timerState.durationSeconds,
+      startedAtMs: timerState.status === 'running' ? runStartedAtMs : 0,
+      elapsedBeforePauseSeconds: timerState.status === 'running'
+        ? Math.floor(accumulatedElapsedMs / 1000)
+        : timerState.elapsedSeconds,
+      attachedTaskId: timerState.attachedTaskId || null,
+      updatedAt: nowIso
+    });
+  }
+
+  function applyCloudTimerState(cloudTimer, opts) {
+    if (!cloudTimer || typeof cloudTimer !== 'object') return false;
+    var force = Boolean(opts && opts.force);
+    var updatedAt = typeof cloudTimer.updatedAt === 'string' ? cloudTimer.updatedAt : '';
+    if (!force && lastCloudUpdatedAt && updatedAt && updatedAt <= lastCloudUpdatedAt) {
+      return false;
+    }
+
+    var mode = MODES[cloudTimer.mode] ? cloudTimer.mode : 'pomodoro';
+    var durationSeconds = Number.isFinite(Number(cloudTimer.durationSeconds))
+      ? Math.max(0, Math.min(14400, Math.floor(Number(cloudTimer.durationSeconds))))
+      : MODES[mode].durationSeconds;
+    var status = ['idle', 'running', 'paused', 'completed'].indexOf(cloudTimer.status) !== -1
+      ? cloudTimer.status
+      : 'idle';
+    var elapsedBefore = Math.max(0, Math.floor(Number(cloudTimer.elapsedBeforePauseSeconds) || 0));
+    var startedAtMs = status === 'running' && Number(cloudTimer.startedAtMs) > 0
+      ? Math.floor(Number(cloudTimer.startedAtMs))
+      : 0;
+    var nextAttachedId = typeof cloudTimer.attachedTaskId === 'string' && cloudTimer.attachedTaskId
+      ? cloudTimer.attachedTaskId
+      : null;
+
+    if (!force && timerState.mode === mode && timerState.status === status &&
+        timerState.durationSeconds === durationSeconds &&
+        (timerState.attachedTaskId || null) === nextAttachedId) {
+      if (status === 'running' && runStartedAtMs === startedAtMs &&
+          Math.floor(accumulatedElapsedMs / 1000) === elapsedBefore) {
+        if (updatedAt) lastCloudUpdatedAt = updatedAt;
+        return false;
+      }
+      if (status !== 'running' && timerState.elapsedSeconds === elapsedBefore) {
+        if (updatedAt) lastCloudUpdatedAt = updatedAt;
+        return false;
+      }
+    }
+
+    clearTicker();
+    timerState.mode = mode;
+    timerState.durationSeconds = durationSeconds;
+    timerState.attachedTaskId = nextAttachedId;
+
+    if (status === 'running' && startedAtMs > 0) {
+      var nowMs = Date.now();
+      var totalElapsed = elapsedBefore + Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
+      if (mode !== 'stopwatch' && totalElapsed >= durationSeconds) {
+        accumulatedElapsedMs = durationSeconds * 1000;
+        runStartedAtMs = 0;
+        timerState.running = false;
+        timerState.status = 'completed';
+        timerState.elapsedSeconds = durationSeconds;
+        timerState.remainingSeconds = 0;
+      } else {
+        accumulatedElapsedMs = elapsedBefore * 1000;
+        runStartedAtMs = startedAtMs;
+        timerState.running = true;
+        timerState.status = 'running';
+        timerState.elapsedSeconds = mode === 'stopwatch' ? totalElapsed : Math.min(durationSeconds, totalElapsed);
+        timerState.remainingSeconds = mode === 'stopwatch' ? 0 : Math.max(0, durationSeconds - totalElapsed);
+        intervalId = global.setInterval(syncTick, 250);
+      }
+    } else if (status === 'paused') {
+      accumulatedElapsedMs = elapsedBefore * 1000;
+      runStartedAtMs = 0;
+      timerState.running = false;
+      timerState.status = 'paused';
+      timerState.elapsedSeconds = mode === 'stopwatch' ? elapsedBefore : Math.min(durationSeconds, elapsedBefore);
+      timerState.remainingSeconds = mode === 'stopwatch' ? 0 : Math.max(0, durationSeconds - timerState.elapsedSeconds);
+    } else if (status === 'completed') {
+      accumulatedElapsedMs = durationSeconds * 1000;
+      runStartedAtMs = 0;
+      timerState.running = false;
+      timerState.status = 'completed';
+      timerState.elapsedSeconds = durationSeconds;
+      timerState.remainingSeconds = 0;
+    } else {
+      accumulatedElapsedMs = 0;
+      runStartedAtMs = 0;
+      timerState.running = false;
+      timerState.status = 'idle';
+      timerState.elapsedSeconds = 0;
+      timerState.remainingSeconds = durationSeconds;
+    }
+
+    timerState.loggedMinutesThisSession = Math.floor(timerState.elapsedSeconds / 60);
+    if (updatedAt) lastCloudUpdatedAt = updatedAt;
+    notify('sync');
+    return true;
+  }
+
   function clearTicker() {
     if (intervalId !== null) {
       global.clearInterval(intervalId);
@@ -214,6 +329,8 @@
         timerState.running = false;
         timerState.status = 'completed';
         accumulatedElapsedMs = timerState.durationSeconds * 1000;
+        runStartedAtMs = 0;
+        syncTimerToStore();
         playChime('complete');
         notify('complete');
         return;
@@ -229,6 +346,7 @@
     flushMinutesToTask();
     timerState.attachedTaskId = nextId;
     timerState.loggedMinutesThisSession = Math.floor(timerState.elapsedSeconds / 60);
+    syncTimerToStore();
     notify('attach');
   }
 
@@ -248,6 +366,7 @@
 
     clearTicker();
     intervalId = global.setInterval(syncTick, 250);
+    syncTimerToStore();
     notify('start');
   }
 
@@ -262,8 +381,10 @@
     timerState.elapsedSeconds = totalSeconds;
     flushMinutesToTask();
     clearTicker();
+    runStartedAtMs = 0;
     timerState.running = false;
     timerState.status = 'paused';
+    syncTimerToStore();
     notify('pause');
   }
 
@@ -281,6 +402,7 @@
     timerState.elapsedSeconds = 0;
     timerState.remainingSeconds = timerState.durationSeconds;
     timerState.loggedMinutesThisSession = 0;
+    syncTimerToStore();
     notify('reset');
   }
 
@@ -301,6 +423,7 @@
     timerState.status = 'idle';
     timerState.running = false;
     timerState.loggedMinutesThisSession = 0;
+    syncTimerToStore();
     notify('mode');
   }
 
@@ -308,9 +431,39 @@
     return Object.keys(MODES).map(function (k) { return Object.assign({}, MODES[k]); });
   }
 
-  // Detach silently if attached task is deleted from Store
-  if (TaskFlow.Store && typeof TaskFlow.Store.subscribe === 'function') {
-    TaskFlow.Store.subscribe(function (storeState) {
+  // Hydrate and subscribe to cloud/guest active timer + detach if attached task is deleted
+  var initialStore = getStore();
+  if (initialStore && typeof initialStore.subscribe === 'function') {
+    if (typeof initialStore.getActiveTimer === 'function') {
+      var bootTimer = initialStore.getActiveTimer();
+      if (bootTimer) {
+        applyCloudTimerState(bootTimer, { force: true });
+      }
+    }
+    initialStore.subscribe(function (storeState, meta) {
+      var reason = meta && meta.reason ? meta.reason : '';
+      if (reason === 'authSwitch' || reason === 'workspaceSync') {
+        var cloudTimer = typeof initialStore.getActiveTimer === 'function'
+          ? initialStore.getActiveTimer()
+          : (storeState && storeState.activeTimer ? storeState.activeTimer : null);
+        if (cloudTimer) {
+          applyCloudTimerState(cloudTimer, { force: reason === 'authSwitch' });
+        } else if (reason === 'authSwitch') {
+          clearTicker();
+          accumulatedElapsedMs = 0;
+          runStartedAtMs = 0;
+          timerState.mode = 'pomodoro';
+          timerState.status = 'idle';
+          timerState.running = false;
+          timerState.durationSeconds = MODES.pomodoro.durationSeconds;
+          timerState.remainingSeconds = MODES.pomodoro.durationSeconds;
+          timerState.elapsedSeconds = 0;
+          timerState.attachedTaskId = null;
+          timerState.loggedMinutesThisSession = 0;
+          lastCloudUpdatedAt = '';
+          notify('sync');
+        }
+      }
       if (!timerState.attachedTaskId) return;
       var exists = storeState.tasks.some(function (t) { return t.id === timerState.attachedTaskId; });
       if (!exists) {
