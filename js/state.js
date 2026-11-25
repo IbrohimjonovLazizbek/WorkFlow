@@ -1873,8 +1873,34 @@
   /* =========================================================================
    * Undo, Clear, Reset, Export & Import
    * ========================================================================= */
+  function remapStateIdsForCloud(targetState) {
+    if (!targetState || typeof targetState !== 'object') return targetState;
+    var routineIdMap = {};
+
+    targetState.routines = (Array.isArray(targetState.routines) ? targetState.routines : []).map(function (r) {
+      var nextId = uid('rtn');
+      if (r && r.id) routineIdMap[r.id] = nextId;
+      return Object.assign({}, r, { id: nextId });
+    });
+
+    targetState.tasks = (Array.isArray(targetState.tasks) ? targetState.tasks : []).map(function (t) {
+      var nextRoutineId = t.routineId && routineIdMap[t.routineId] ? routineIdMap[t.routineId] : t.routineId;
+      var nextSubtasks = Array.isArray(t.subtasks)
+        ? t.subtasks.map(function (s) { return Object.assign({}, s, { id: uid('sub') }); })
+        : [];
+      return Object.assign({}, t, {
+        id: uid('task'),
+        routineId: nextRoutineId || null,
+        subtasks: nextSubtasks
+      });
+    });
+
+    return targetState;
+  }
+
   function syncFullSnapshotToCloud() {
     if (!isCloudActive()) return;
+    var opUserId = authState.user.id;
     var payload = {
       mode: 'replace',
       tasks: state.tasks,
@@ -1883,7 +1909,35 @@
       settings: state.settings
     };
     queueCloudOp(function () {
-      return apiRequest('/api/workspace/import', 'POST', payload);
+      return apiRequest('/api/workspace/import', 'POST', payload).then(function (res) {
+        if (
+          res &&
+          res.workspace &&
+          isCloudActive() &&
+          authState.user &&
+          authState.user.id === opUserId &&
+          pendingSyncOps <= 1
+        ) {
+          var reconciled = sanitizeFullState({
+            version: 1,
+            selectedDate: state.selectedDate,
+            activeView: state.activeView,
+            theme: state.theme,
+            settings: res.workspace.settings || state.settings,
+            tasks: Array.isArray(res.workspace.tasks) ? res.workspace.tasks : state.tasks,
+            routines: Array.isArray(res.workspace.routines) ? res.workspace.routines : state.routines,
+            reflections: res.workspace.reflections || state.reflections,
+            filters: state.filters,
+            isSampleData: false
+          });
+          state.tasks = reconciled.tasks;
+          state.routines = reconciled.routines;
+          state.reflections = reconciled.reflections;
+          state.settings = reconciled.settings;
+          state.isSampleData = false;
+          commit('workspaceSync');
+        }
+      });
     });
   }
 
@@ -1920,6 +1974,9 @@
   function resetDemoData() {
     pushUndoSnapshot('Restored demo workspace');
     var seed = createSeedState();
+    if (isCloudActive()) {
+      remapStateIdsForCloud(seed);
+    }
     state.tasks = seed.tasks;
     state.routines = seed.routines;
     state.reflections = seed.reflections;
@@ -2009,6 +2066,7 @@
     pushUndoSnapshot('Imported backup');
     var cleanState = sanitizeFullState(parsed);
     if (isCloudActive()) {
+      remapStateIdsForCloud(cleanState);
       cleanState.isSampleData = false;
     }
     state = cleanState;
