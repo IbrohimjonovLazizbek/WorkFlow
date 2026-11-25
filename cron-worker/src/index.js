@@ -142,16 +142,38 @@ function buildEveningMessage(user, dateKey, tasks, settings) {
   return lines.join('\n');
 }
 
-async function sendTelegramMessage(botToken, chatId, text) {
+const DEFAULT_APP_URL = 'https://workflow.myclass.uz';
+
+function buildBriefingInlineKeyboard(appUrl = DEFAULT_APP_URL) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "📋 Interactive Tasks", callback_data: 'act:today' },
+        { text: '➕ Add Task', callback_data: 'act:add' }
+      ],
+      [
+        { text: '📊 Progress & Stats', callback_data: 'act:stats' },
+        { text: '🌐 Open TaskFlow', web_app: { url: appUrl } }
+      ]
+    ]
+  };
+}
+
+async function sendTelegramMessage(botToken, chatId, text, replyMarkup = null) {
+  const payload = {
+    chat_id: chatId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true
+  };
+  if (replyMarkup) {
+    payload.reply_markup = replyMarkup;
+  }
+
   const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true
-    })
+    body: JSON.stringify(payload)
   });
 
   if (!response.ok) {
@@ -224,10 +246,17 @@ export async function runHourlyBriefings(env, now = new Date()) {
       const settings = settingsRes?.results?.[0] || null;
       const nowIso = now.toISOString();
 
+      const appUrl = env.APP_URL || DEFAULT_APP_URL;
+
       if (shouldMorning) {
         try {
           const text = buildMorningMessage(user, dateKey, tasks, settings);
-          await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, user.telegram_chat_id, text);
+          await sendTelegramMessage(
+            env.TELEGRAM_BOT_TOKEN,
+            user.telegram_chat_id,
+            text,
+            buildBriefingInlineKeyboard(appUrl)
+          );
           await env.DB.prepare(
             `UPDATE users SET last_morning_sent_date = ?, updated_at = ? WHERE id = ?`
           )
@@ -243,7 +272,12 @@ export async function runHourlyBriefings(env, now = new Date()) {
       if (shouldEvening) {
         try {
           const text = buildEveningMessage(user, dateKey, tasks, settings);
-          await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, user.telegram_chat_id, text);
+          await sendTelegramMessage(
+            env.TELEGRAM_BOT_TOKEN,
+            user.telegram_chat_id,
+            text,
+            buildBriefingInlineKeyboard(appUrl)
+          );
           await env.DB.prepare(
             `UPDATE users SET last_evening_sent_date = ?, updated_at = ? WHERE id = ?`
           )

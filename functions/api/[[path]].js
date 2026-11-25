@@ -1675,23 +1675,45 @@ async function handlePutReflection(dateKey, request, session, env) {
  * Telegram Helpers & Route Handlers
  * ========================================================================== */
 
-async function sendTelegramMessage(botToken, chatId, text) {
+const DEFAULT_PUBLIC_APP_URL = 'https://workflow.myclass.uz';
+
+function utf8ByteLength(str) {
+  return textEncoder.encode(String(str || '')).length;
+}
+
+function resolveTelegramAppUrl(origin) {
+  if (typeof origin === 'string' && origin.startsWith('https://')) {
+    return origin;
+  }
+  return DEFAULT_PUBLIC_APP_URL;
+}
+
+function formatHourClock(hour) {
+  const h = ((Number(hour) || 0) % 24 + 24) % 24;
+  return `${String(h).padStart(2, '0')}:00`;
+}
+
+function truncateButtonLabel(text, maxChars = 34) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (clean.length <= maxChars) return clean;
+  return `${clean.slice(0, maxChars - 1)}…`;
+}
+
+async function callTelegramApi(botToken, method, body) {
   if (!botToken) {
     return { ok: false, error: 'TELEGRAM_BOT_TOKEN is not configured' };
   }
   try {
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true
-      })
+      body: JSON.stringify(body)
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => '');
+      if (method === 'editMessageText' && detail.includes('message is not modified')) {
+        return { ok: true, unchanged: true };
+      }
       return { ok: false, status: response.status, error: detail || `Telegram HTTP ${response.status}` };
     }
     const payload = await response.json().catch(() => ({ ok: true }));
@@ -1699,6 +1721,81 @@ async function sendTelegramMessage(botToken, chatId, text) {
   } catch (err) {
     return { ok: false, error: err?.message || 'Telegram network error' };
   }
+}
+
+async function sendTelegramMessage(botToken, chatId, text, replyMarkup = null) {
+  const body = {
+    chat_id: chatId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true
+  };
+  if (replyMarkup) {
+    body.reply_markup = replyMarkup;
+  }
+  return callTelegramApi(botToken, 'sendMessage', body);
+}
+
+async function editTelegramMessage(botToken, chatId, messageId, text, inlineKeyboard = null) {
+  const body = {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true
+  };
+  if (inlineKeyboard) {
+    body.reply_markup = inlineKeyboard;
+  }
+  return callTelegramApi(botToken, 'editMessageText', body);
+}
+
+async function answerTelegramCallback(botToken, callbackQueryId, text = '', showAlert = false) {
+  if (!callbackQueryId) return { ok: true };
+  return callTelegramApi(botToken, 'answerCallbackQuery', {
+    callback_query_id: callbackQueryId,
+    text: text ? String(text).slice(0, 180) : undefined,
+    show_alert: showAlert ? true : undefined
+  });
+}
+
+function buildMainReplyKeyboard(isLinked, origin) {
+  const appUrl = resolveTelegramAppUrl(origin);
+  if (isLinked) {
+    return {
+      keyboard: [
+        [{ text: "📋 Today's Tasks" }, { text: '➕ Add Task' }],
+        [{ text: '✅ Quick Complete' }, { text: '📊 Progress & Stats' }],
+        [{ text: '⏰ Reminders' }, { text: '🌐 Open TaskFlow', web_app: { url: appUrl } }]
+      ],
+      resize_keyboard: true,
+      is_persistent: true
+    };
+  }
+  return {
+    keyboard: [
+      [{ text: '🔗 Enter Pairing Code' }, { text: '🌐 Open TaskFlow', web_app: { url: appUrl } }],
+      [{ text: '❓ How to Link' }]
+    ],
+    resize_keyboard: true,
+    is_persistent: true
+  };
+}
+
+function encodeTaskToggleData(task, dateKey, idx) {
+  const direct = `t:${task.id}`;
+  if (utf8ByteLength(direct) <= 64) {
+    return direct;
+  }
+  return `ti:${dateKey}:${idx}`;
+}
+
+function encodeTaskAttrData(prefix, task, dateKey, idx, value) {
+  const direct = `${prefix}:${task.id}:${value}`;
+  if (utf8ByteLength(direct) <= 64) {
+    return direct;
+  }
+  return `${prefix}i:${dateKey}:${idx}:${value}`;
 }
 
 function buildTodaySummaryMessage(userRow, dateKey, tasks, settingsRow) {
@@ -1719,7 +1816,7 @@ function buildTodaySummaryMessage(userRow, dateKey, tasks, settingsRow) {
 
   if (tasks.length === 0) {
     lines.push('No tasks scheduled for this date yet.');
-    lines.push('Send <code>/add Task title</code> to add one right now.');
+    lines.push('Tap <b>➕ Add Task</b> below or send <code>/add Task title</code>.');
   } else {
     tasks.forEach((task, idx) => {
       const icon = task.status === 'done'
@@ -1730,10 +1827,246 @@ function buildTodaySummaryMessage(userRow, dateKey, tasks, settingsRow) {
       lines.push(`${idx + 1}. ${icon} ${escapeHtml(task.title)}${timeHint}${pri}`);
     });
     lines.push('');
-    lines.push('Send <code>/done &lt;number&gt;</code> to mark a task complete.');
+    lines.push('Tap any task box below to toggle ✅ done / ⬜ open.');
   }
 
   return lines.join('\n');
+}
+
+function buildTodayChecklistView(userRow, dateKey, tasks, settingsRow, origin, openOnly = false) {
+  const indexed = tasks.map((task, idx) => ({ task, idx }));
+  const visible = openOnly ? indexed.filter((item) => item.task.status !== 'done') : indexed;
+  const capped = visible.slice(0, 12);
+
+  let text;
+  if (openOnly && tasks.length > 0 && visible.length === 0) {
+    const actualMinutes = tasks.reduce((sum, t) => sum + (Number(t.actual_minutes) || 0), 0);
+    text = [
+      `🎉 <b>All ${tasks.length} task(s) done for ${escapeHtml(dateKey)}!</b>`,
+      `⏱️ Focus logged: <b>${formatMinutes(actualMinutes)}</b>`,
+      '',
+      'Want to plan another priority or review all tasks?'
+    ].join('\n');
+  } else {
+    text = buildTodaySummaryMessage(userRow, dateKey, tasks, settingsRow);
+    if (visible.length > capped.length) {
+      text += `\n<i>Showing ${capped.length} of ${visible.length} clickable tasks.</i>`;
+    }
+  }
+
+  const rows = capped.map(({ task, idx }) => {
+    const icon = task.status === 'done' ? '✅' : (task.status === 'in_progress' ? '⏳' : '⬜');
+    const pri = task.priority === 'high' ? ' 🔴' : '';
+    return [{
+      text: `${icon} ${idx + 1}. ${truncateButtonLabel(task.title, 32)}${pri}`,
+      callback_data: encodeTaskToggleData(task, dateKey, idx)
+    }];
+  });
+
+  rows.push([
+    { text: '➕ Add Task', callback_data: 'act:add' },
+    { text: '🔄 Refresh', callback_data: openOnly ? 'act:quick' : 'act:today' }
+  ]);
+  rows.push([
+    { text: openOnly ? '📋 All Today' : '✅ Open Only', callback_data: openOnly ? 'act:today' : 'act:quick' },
+    { text: '📊 Stats', callback_data: 'act:stats' },
+    { text: '⏰ Reminders', callback_data: 'act:rem' }
+  ]);
+
+  if (resolveTelegramAppUrl(origin) === origin) {
+    rows.push([{ text: '🌐 Open TaskFlow Workspace', web_app: { url: origin } }]);
+  }
+
+  return {
+    text,
+    inlineKeyboard: { inline_keyboard: rows }
+  };
+}
+
+function buildTaskCreatedView(task, idxForFallback = 0) {
+  const priMap = { high: '🔴 High', medium: '🟡 Medium', low: '🟢 Low' };
+  const blockMap = { morning: '🌅 Morning', afternoon: '☀️ Afternoon', evening: '🌙 Evening', anytime: '📥 Anytime' };
+  const priLabel = priMap[task.priority] || '🟡 Medium';
+  const blockLabel = blockMap[task.timeBlock] || '📥 Anytime';
+  const statusIcon = task.status === 'done' ? '✅ Completed' : '⬜ Open';
+
+  const text = [
+    `✅ <b>Saved for <code>${escapeHtml(task.date)}</code>:</b>`,
+    `<b>${escapeHtml(task.title)}</b>`,
+    `${statusIcon} • ${priLabel} • ${blockLabel}`,
+    '',
+    'Tap any box below to adjust priority or time block:'
+  ].join('\n');
+
+  const inlineKeyboard = {
+    inline_keyboard: [
+      [
+        { text: task.priority === 'high' ? '🔴 High ✓' : '🔴 High', callback_data: encodeTaskAttrData('tp', task, task.date, idxForFallback, 'high') },
+        { text: task.priority === 'medium' ? '🟡 Med ✓' : '🟡 Med', callback_data: encodeTaskAttrData('tp', task, task.date, idxForFallback, 'medium') },
+        { text: task.priority === 'low' ? '🟢 Low ✓' : '🟢 Low', callback_data: encodeTaskAttrData('tp', task, task.date, idxForFallback, 'low') }
+      ],
+      [
+        { text: task.timeBlock === 'morning' ? '🌅 Morning ✓' : '🌅 Morning', callback_data: encodeTaskAttrData('tb', task, task.date, idxForFallback, 'morning') },
+        { text: task.timeBlock === 'afternoon' ? '☀️ Afternoon ✓' : '☀️ Afternoon', callback_data: encodeTaskAttrData('tb', task, task.date, idxForFallback, 'afternoon') },
+        { text: task.timeBlock === 'evening' ? '🌙 Evening ✓' : '🌙 Evening', callback_data: encodeTaskAttrData('tb', task, task.date, idxForFallback, 'evening') }
+      ],
+      [
+        { text: task.status === 'done' ? '↩️ Reopen Task' : '✅ Mark Done', callback_data: encodeTaskToggleData(task, task.date, idxForFallback) },
+        { text: "📋 Today's Tasks", callback_data: 'act:today' }
+      ]
+    ]
+  };
+
+  return { text, inlineKeyboard };
+}
+
+function buildRemindersView(userRow) {
+  const user = formatUser(userRow);
+  const statusLine = user.telegramNotificationsEnabled ? '🔔 Enabled' : '🔕 Paused';
+  const text = [
+    `⏰ <b>Daily Telegram Briefings</b>`,
+    '',
+    `• Status: <b>${statusLine}</b>`,
+    `• Timezone: <code>${escapeHtml(user.timezone)}</code>`,
+    `• Morning Agenda: <b>${formatHourClock(user.morningReminderHour)}</b>`,
+    `• Evening Check-in: <b>${formatHourClock(user.eveningReminderHour)}</b>`,
+    '',
+    'Tap any box below to update right now:'
+  ].join('\n');
+
+  const inlineKeyboard = {
+    inline_keyboard: [
+      [
+        {
+          text: user.telegramNotificationsEnabled ? '🔕 Pause Daily Briefings' : '🔔 Enable Daily Briefings',
+          callback_data: 'rem:toggle'
+        }
+      ],
+      [
+        { text: '☀️ -1h', callback_data: 'rem:mh:-1' },
+        { text: `Morning ${formatHourClock(user.morningReminderHour)}`, callback_data: 'act:rem' },
+        { text: '☀️ +1h', callback_data: 'rem:mh:1' }
+      ],
+      [
+        { text: '🌙 -1h', callback_data: 'rem:eh:-1' },
+        { text: `Evening ${formatHourClock(user.eveningReminderHour)}`, callback_data: 'act:rem' },
+        { text: '🌙 +1h', callback_data: 'rem:eh:1' }
+      ],
+      [
+        { text: '📤 Send Today Summary', callback_data: 'act:summary' },
+        { text: "📋 Today's Tasks", callback_data: 'act:today' }
+      ]
+    ]
+  };
+
+  return { text, inlineKeyboard };
+}
+
+function buildStatsInlineKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '🔄 Refresh Stats', callback_data: 'act:stats' },
+        { text: "📋 Today's Tasks", callback_data: 'act:today' }
+      ],
+      [
+        { text: '➕ Add Task', callback_data: 'act:add' },
+        { text: '⏰ Reminders', callback_data: 'act:rem' }
+      ]
+    ]
+  };
+}
+
+async function getChatState(db, chatId) {
+  try {
+    return await db.prepare('SELECT chat_id, action, draft_text FROM telegram_chat_states WHERE chat_id = ?')
+      .bind(chatId)
+      .first();
+  } catch {
+    return null;
+  }
+}
+
+async function setChatState(db, chatId, action, draftText = null) {
+  try {
+    await db.prepare(
+      `INSERT INTO telegram_chat_states (chat_id, action, draft_text, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(chat_id) DO UPDATE SET
+         action = excluded.action,
+         draft_text = excluded.draft_text,
+         updated_at = excluded.updated_at`
+    ).bind(chatId, action, draftText, new Date().toISOString()).run();
+  } catch {
+    /* ignore cleanly if state table absent */
+  }
+}
+
+async function clearChatState(db, chatId) {
+  try {
+    await db.prepare('DELETE FROM telegram_chat_states WHERE chat_id = ?').bind(chatId).run();
+  } catch {
+    /* ignore cleanly if state table absent */
+  }
+}
+
+async function loadTodayTasksAndSettings(db, userId, dateKey) {
+  const [tasksRes, settingsRes] = await db.batch([
+    db.prepare(
+      'SELECT * FROM tasks WHERE user_id = ? AND date = ? ORDER BY sort_order ASC, created_at ASC'
+    ).bind(userId, dateKey),
+    db.prepare('SELECT * FROM user_settings WHERE user_id = ?').bind(userId)
+  ]);
+  return {
+    tasks: tasksRes?.results || [],
+    settingsRow: settingsRes?.results?.[0] || null
+  };
+}
+
+async function createQuickTaskForTelegramUser(db, userRow, todayKey, title) {
+  const cleanTitle = String(title || '').trim().slice(0, 500);
+  const maxRow = await db.prepare(
+    'SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM tasks WHERE user_id = ? AND date = ?'
+  ).bind(userRow.id, todayKey).first();
+  const nextOrder = Number(maxRow?.max_order ?? -1) + 1;
+  const nowIso = new Date().toISOString();
+
+  const task = {
+    id: `task_${crypto.randomUUID()}`,
+    title: cleanTitle,
+    notes: '',
+    date: todayKey,
+    timeBlock: 'anytime',
+    scheduledTime: '',
+    estimatedMinutes: 30,
+    actualMinutes: 0,
+    priority: 'medium',
+    category: 'work',
+    status: 'todo',
+    subtasks: [],
+    routineId: null,
+    order: nextOrder,
+    createdAt: nowIso,
+    completedAt: null
+  };
+
+  await buildTaskInsertStmt(db, userRow.id, task).run();
+  return { task, indexInDay: nextOrder };
+}
+
+async function resolveTaskFromCallbackToken(db, userId, modePrefix, payload) {
+  if (modePrefix === 't' || modePrefix === 'tp' || modePrefix === 'tb') {
+    const row = await db.prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?')
+      .bind(payload.id, userId)
+      .first();
+    return row ? { row, indexInDay: 0 } : null;
+  }
+  const res = await db.prepare(
+    'SELECT * FROM tasks WHERE user_id = ? AND date = ? ORDER BY sort_order ASC, created_at ASC'
+  ).bind(userId, payload.dateKey).all();
+  const rows = res?.results || [];
+  const row = rows[payload.idx] || null;
+  return row ? { row, indexInDay: payload.idx } : null;
 }
 
 async function computeUserStatsMessage(db, userRow, todayDateKey) {
@@ -1849,21 +2182,15 @@ async function handleTelegramSendSummary(request, session, env) {
     ? parsed.data.date
     : getDateKeyInTimezone(userRow.timezone || DEFAULT_TIMEZONE);
 
-  const [tasksRes, settingsRes] = await env.DB.batch([
-    env.DB.prepare(
-      'SELECT * FROM tasks WHERE user_id = ? AND date = ? ORDER BY sort_order ASC, created_at ASC'
-    ).bind(session.userId, targetDate),
-    env.DB.prepare('SELECT * FROM user_settings WHERE user_id = ?').bind(session.userId)
-  ]);
+  const { tasks, settingsRow } = await loadTodayTasksAndSettings(env.DB, session.userId, targetDate);
+  const view = buildTodayChecklistView(userRow, targetDate, tasks, settingsRow, new URL(request.url).origin, false);
 
-  const text = buildTodaySummaryMessage(
-    userRow,
-    targetDate,
-    tasksRes?.results || [],
-    settingsRes?.results?.[0] || null
+  const sent = await sendTelegramMessage(
+    env.TELEGRAM_BOT_TOKEN,
+    userRow.telegram_chat_id,
+    view.text,
+    view.inlineKeyboard
   );
-
-  const sent = await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, userRow.telegram_chat_id, text);
   if (!sent.ok) {
     return errorResponse(502, 'Failed to send summary to Telegram', 'TELEGRAM_API_ERROR', sent.error);
   }
@@ -1875,7 +2202,319 @@ async function handleTelegramSendSummary(request, session, env) {
   });
 }
 
-async function processTelegramWebhookUpdate(update, env) {
+async function applyPairingCodeForChat(env, chatId, tgUsername, rawCode, origin) {
+  const code = String(rawCode || '').trim().toUpperCase();
+  if (!code) {
+    await sendTelegramMessage(
+      env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      'Paste your 8-character pairing code from <b>TaskFlow → Cabinet → Telegram</b> (no command needed):',
+      { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'act:cancel' }]] }
+    );
+    return;
+  }
+
+  const codeRow = await env.DB.prepare('SELECT * FROM telegram_link_codes WHERE code = ?')
+    .bind(code)
+    .first();
+  if (!codeRow || Number(codeRow.expires_at) <= Date.now()) {
+    await sendTelegramMessage(
+      env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      '❌ That pairing code is invalid or expired. Generate a fresh code in TaskFlow → Personal Cabinet → Telegram and paste it here.',
+      { inline_keyboard: [[{ text: '🔗 Try Another Code', callback_data: 'act:prompt_link' }]] }
+    );
+    return;
+  }
+
+  const nowIso = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      'UPDATE users SET telegram_chat_id = NULL, telegram_username = NULL, updated_at = ? WHERE telegram_chat_id = ? AND id != ?'
+    ).bind(nowIso, chatId, codeRow.user_id),
+    env.DB.prepare(
+      'UPDATE users SET telegram_chat_id = ?, telegram_username = ?, updated_at = ? WHERE id = ?'
+    ).bind(chatId, tgUsername, nowIso, codeRow.user_id),
+    env.DB.prepare('DELETE FROM telegram_link_codes WHERE code = ?').bind(code)
+  ]);
+  await clearChatState(env.DB, chatId);
+
+  const linkedUser = await env.DB.prepare('SELECT * FROM users WHERE id = ?')
+    .bind(codeRow.user_id)
+    .first();
+  const label = escapeHtml(linkedUser?.name || linkedUser?.email || 'your TaskFlow cabinet');
+
+  await sendTelegramMessage(
+    env.TELEGRAM_BOT_TOKEN,
+    chatId,
+    `✅ Connected to <b>${label}</b>!\n\nUse the menu boxes below anytime — no commands needed:`,
+    buildMainReplyKeyboard(true, origin)
+  );
+}
+
+async function processTelegramCallbackQuery(callbackQuery, env, origin) {
+  const chatIdRaw = callbackQuery?.message?.chat?.id;
+  const messageId = callbackQuery?.message?.message_id;
+  const callbackId = callbackQuery?.id;
+  const data = typeof callbackQuery?.data === 'string' ? callbackQuery.data : '';
+  if (chatIdRaw === undefined || chatIdRaw === null || !data) {
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId);
+    return;
+  }
+
+  const chatId = String(chatIdRaw);
+  const userRow = await env.DB.prepare('SELECT * FROM users WHERE telegram_chat_id = ?')
+    .bind(chatId)
+    .first();
+
+  if (data === 'act:cancel') {
+    await clearChatState(env.DB, chatId);
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, 'Cancelled');
+    if (messageId) {
+      await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, 'Cancelled.');
+    }
+    return;
+  }
+
+  if (data === 'act:prompt_link') {
+    await setChatState(env.DB, chatId, 'awaiting_link_code');
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId);
+    await sendTelegramMessage(
+      env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      '🔗 Paste your 8-character pairing code from <b>TaskFlow → Personal Cabinet → Telegram</b>:',
+      { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'act:cancel' }]] }
+    );
+    return;
+  }
+
+  if (!userRow) {
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, 'Link your Google cabinet first', true);
+    await sendTelegramMessage(
+      env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      '🔗 Connect this chat to your TaskFlow Google cabinet first.',
+      {
+        inline_keyboard: [[{ text: '🔗 Enter Pairing Code', callback_data: 'act:prompt_link' }]]
+      }
+    );
+    return;
+  }
+
+  const todayKey = getDateKeyInTimezone(userRow.timezone || DEFAULT_TIMEZONE);
+
+  if (data === 'act:today' || data === 'act:quick') {
+    const openOnly = data === 'act:quick';
+    const { tasks, settingsRow } = await loadTodayTasksAndSettings(env.DB, userRow.id, todayKey);
+    const view = buildTodayChecklistView(userRow, todayKey, tasks, settingsRow, origin, openOnly);
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId);
+    if (messageId) {
+      await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, view.text, view.inlineKeyboard);
+    } else {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, view.text, view.inlineKeyboard);
+    }
+    return;
+  }
+
+  if (data === 'act:add') {
+    await setChatState(env.DB, chatId, 'awaiting_task_title');
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId);
+    await sendTelegramMessage(
+      env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      '➕ <b>New Task for Today</b>\nJust send the task title below — no commands needed:',
+      { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'act:cancel' }]] }
+    );
+    return;
+  }
+
+  if (data === 'act:save_draft') {
+    const chatState = await getChatState(env.DB, chatId);
+    const draft = chatState?.draft_text ? chatState.draft_text.trim() : '';
+    await clearChatState(env.DB, chatId);
+    if (!draft) {
+      await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, 'Nothing to save');
+      return;
+    }
+    const { task, indexInDay } = await createQuickTaskForTelegramUser(env.DB, userRow, todayKey, draft);
+    const card = buildTaskCreatedView(task, indexInDay);
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, '✅ Task added!');
+    if (messageId) {
+      await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, card.text, card.inlineKeyboard);
+    } else {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, card.text, card.inlineKeyboard);
+    }
+    return;
+  }
+
+  if (data === 'act:stats') {
+    const msg = await computeUserStatsMessage(env.DB, userRow, todayKey);
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId);
+    if (messageId) {
+      await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, msg, buildStatsInlineKeyboard());
+    } else {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, msg, buildStatsInlineKeyboard());
+    }
+    return;
+  }
+
+  if (data === 'act:rem') {
+    const view = buildRemindersView(userRow);
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId);
+    if (messageId) {
+      await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, view.text, view.inlineKeyboard);
+    } else {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, view.text, view.inlineKeyboard);
+    }
+    return;
+  }
+
+  if (data === 'act:summary') {
+    const { tasks, settingsRow } = await loadTodayTasksAndSettings(env.DB, userRow.id, todayKey);
+    const view = buildTodayChecklistView(userRow, todayKey, tasks, settingsRow, origin, false);
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, 'Summary sent!');
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, view.text, view.inlineKeyboard);
+    return;
+  }
+
+  if (data.startsWith('rem:')) {
+    const parts = data.split(':');
+    const nowIso = new Date().toISOString();
+    let nextEnabled = Boolean(userRow.telegram_notifications_enabled);
+    let nextMorning = Number.isFinite(Number(userRow.morning_reminder_hour)) ? Number(userRow.morning_reminder_hour) : 8;
+    let nextEvening = Number.isFinite(Number(userRow.evening_reminder_hour)) ? Number(userRow.evening_reminder_hour) : 21;
+
+    if (parts[1] === 'toggle') {
+      nextEnabled = !nextEnabled;
+    } else if (parts[1] === 'mh') {
+      nextMorning = (nextMorning + Number(parts[2] || 0) + 24) % 24;
+    } else if (parts[1] === 'eh') {
+      nextEvening = (nextEvening + Number(parts[2] || 0) + 24) % 24;
+    }
+
+    await env.DB.prepare(
+      `UPDATE users
+       SET telegram_notifications_enabled = ?,
+           morning_reminder_hour = ?,
+           evening_reminder_hour = ?,
+           updated_at = ?
+       WHERE id = ?`
+    ).bind(nextEnabled ? 1 : 0, nextMorning, nextEvening, nowIso, userRow.id).run();
+
+    const updatedUserRow = await env.DB.prepare('SELECT * FROM users WHERE id = ?')
+      .bind(userRow.id)
+      .first();
+    const view = buildRemindersView(updatedUserRow || userRow);
+    await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, 'Preferences updated');
+    if (messageId) {
+      await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, view.text, view.inlineKeyboard);
+    }
+    return;
+  }
+
+  // Task priority / time block / toggle callbacks
+  let taskOp = null;
+  const colonParts = data.split(':');
+  if (colonParts[0] === 't' && colonParts.length === 2) {
+    taskOp = { kind: 'toggle', lookupMode: 't', id: colonParts[1] };
+  } else if (colonParts[0] === 'ti' && colonParts.length === 3) {
+    taskOp = { kind: 'toggle', lookupMode: 'ti', dateKey: colonParts[1], idx: Number(colonParts[2]) };
+  } else if ((colonParts[0] === 'tp' || colonParts[0] === 'tb') && colonParts.length === 3) {
+    taskOp = { kind: colonParts[0], lookupMode: colonParts[0], id: colonParts[1], value: colonParts[2] };
+  } else if ((colonParts[0] === 'tpi' || colonParts[0] === 'tbi') && colonParts.length === 4) {
+    taskOp = {
+      kind: colonParts[0].slice(0, 2),
+      lookupMode: 'ti',
+      dateKey: colonParts[1],
+      idx: Number(colonParts[2]),
+      value: colonParts[3]
+    };
+  }
+
+  if (taskOp) {
+    const resolved = await resolveTaskFromCallbackToken(env.DB, userRow.id, taskOp.lookupMode, taskOp);
+    if (!resolved) {
+      await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, 'Task not found', true);
+      return;
+    }
+
+    const row = resolved.row;
+    const isTaskCreationMessage = Boolean(
+      callbackQuery?.message?.reply_markup?.inline_keyboard?.some((r) =>
+        r.some((btn) => typeof btn.callback_data === 'string' && btn.callback_data.startsWith('tp'))
+      )
+    );
+    const isOpenOnlyMessage = Boolean(
+      callbackQuery?.message?.reply_markup?.inline_keyboard?.some((r) =>
+        r.some((btn) => btn.callback_data === 'act:today' && String(btn.text || '').includes('All Today'))
+      )
+    );
+
+    if (taskOp.kind === 'toggle') {
+      const nextStatus = row.status === 'done' ? 'todo' : 'done';
+      const nextCompletedAt = nextStatus === 'done' ? (row.completed_at || new Date().toISOString()) : null;
+      await env.DB.prepare(
+        'UPDATE tasks SET status = ?, completed_at = ? WHERE id = ? AND user_id = ?'
+      ).bind(nextStatus, nextCompletedAt, row.id, userRow.id).run();
+
+      await answerTelegramCallback(
+        env.TELEGRAM_BOT_TOKEN,
+        callbackId,
+        nextStatus === 'done' ? '✅ Completed!' : '↩️ Reopened'
+      );
+
+      if (messageId) {
+        if (isTaskCreationMessage) {
+          const freshRow = await env.DB.prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?')
+            .bind(row.id, userRow.id)
+            .first();
+          if (freshRow) {
+            const card = buildTaskCreatedView(formatTask(freshRow), resolved.indexInDay);
+            await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, card.text, card.inlineKeyboard);
+          }
+        } else {
+          const targetDate = row.date || todayKey;
+          const { tasks, settingsRow } = await loadTodayTasksAndSettings(env.DB, userRow.id, targetDate);
+          const view = buildTodayChecklistView(userRow, targetDate, tasks, settingsRow, origin, isOpenOnlyMessage);
+          await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, view.text, view.inlineKeyboard);
+        }
+      }
+      return;
+    }
+
+    if (taskOp.kind === 'tp' && VALID_PRIORITIES.has(taskOp.value)) {
+      await env.DB.prepare('UPDATE tasks SET priority = ? WHERE id = ? AND user_id = ?')
+        .bind(taskOp.value, row.id, userRow.id)
+        .run();
+      await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, `Priority: ${taskOp.value}`);
+    } else if (taskOp.kind === 'tb' && VALID_TIME_BLOCKS.has(taskOp.value)) {
+      await env.DB.prepare('UPDATE tasks SET time_block = ? WHERE id = ? AND user_id = ?')
+        .bind(taskOp.value, row.id, userRow.id)
+        .run();
+      await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId, `Time block: ${taskOp.value}`);
+    }
+
+    if (messageId) {
+      const freshRow = await env.DB.prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?')
+        .bind(row.id, userRow.id)
+        .first();
+      if (freshRow) {
+        const card = buildTaskCreatedView(formatTask(freshRow), resolved.indexInDay);
+        await editTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId, card.text, card.inlineKeyboard);
+      }
+    }
+    return;
+  }
+
+  await answerTelegramCallback(env.TELEGRAM_BOT_TOKEN, callbackId);
+}
+
+async function processTelegramWebhookUpdate(update, env, origin = DEFAULT_PUBLIC_APP_URL) {
+  if (update?.callback_query) {
+    await processTelegramCallbackQuery(update.callback_query, env, origin);
+    return;
+  }
+
   const message = update?.message || update?.edited_message;
   const chatIdRaw = message?.chat?.id;
   const rawText = typeof message?.text === 'string' ? message.text.trim() : '';
@@ -1888,10 +2527,13 @@ async function processTelegramWebhookUpdate(update, env) {
     ? message.from.username.trim()
     : null;
 
+  const isSlash = rawText.startsWith('/');
   const firstSpace = rawText.search(/\s/);
-  const rawCommand = (firstSpace === -1 ? rawText : rawText.slice(0, firstSpace)).toLowerCase();
-  const cmd = rawCommand.split('@')[0];
-  const arg = firstSpace === -1 ? '' : rawText.slice(firstSpace + 1).trim();
+  const rawCommand = isSlash
+    ? (firstSpace === -1 ? rawText : rawText.slice(0, firstSpace)).toLowerCase()
+    : '';
+  const cmd = rawCommand ? rawCommand.split('@')[0] : '';
+  const arg = isSlash && firstSpace !== -1 ? rawText.slice(firstSpace + 1).trim() : '';
 
   let linkCodeToApply = null;
   if (cmd === '/start' && arg.toLowerCase().startsWith('link_')) {
@@ -1901,48 +2543,7 @@ async function processTelegramWebhookUpdate(update, env) {
   }
 
   if (cmd === '/link' || linkCodeToApply !== null) {
-    if (!linkCodeToApply) {
-      await sendTelegramMessage(
-        env.TELEGRAM_BOT_TOKEN,
-        chatId,
-        'Please include your pairing code: <code>/link ABCDEF12</code>'
-      );
-      return;
-    }
-
-    const codeRow = await env.DB.prepare('SELECT * FROM telegram_link_codes WHERE code = ?')
-      .bind(linkCodeToApply)
-      .first();
-    if (!codeRow || Number(codeRow.expires_at) <= Date.now()) {
-      await sendTelegramMessage(
-        env.TELEGRAM_BOT_TOKEN,
-        chatId,
-        '❌ That pairing code is invalid or expired. Generate a fresh code in TaskFlow → Account Cabinet → Telegram.'
-      );
-      return;
-    }
-
-    const nowIso = new Date().toISOString();
-    await env.DB.batch([
-      env.DB.prepare(
-        'UPDATE users SET telegram_chat_id = NULL, telegram_username = NULL, updated_at = ? WHERE telegram_chat_id = ? AND id != ?'
-      ).bind(nowIso, chatId, codeRow.user_id),
-      env.DB.prepare(
-        'UPDATE users SET telegram_chat_id = ?, telegram_username = ?, updated_at = ? WHERE id = ?'
-      ).bind(chatId, tgUsername, nowIso, codeRow.user_id),
-      env.DB.prepare('DELETE FROM telegram_link_codes WHERE code = ?').bind(linkCodeToApply)
-    ]);
-
-    const linkedUser = await env.DB.prepare('SELECT name, email FROM users WHERE id = ?')
-      .bind(codeRow.user_id)
-      .first();
-    const label = escapeHtml(linkedUser?.name || linkedUser?.email || 'your TaskFlow cabinet');
-
-    await sendTelegramMessage(
-      env.TELEGRAM_BOT_TOKEN,
-      chatId,
-      `✅ Connected to <b>${label}</b>!\n\nTry:\n• <code>/today</code> — view today's tasks\n• <code>/add Task title</code> — add a task\n• <code>/done 1</code> — complete task #1\n• <code>/stats</code> — progress & streak\n• <code>/help</code> — all commands`
-    );
+    await applyPairingCodeForChat(env, chatId, tgUsername, linkCodeToApply, origin);
     return;
   }
 
@@ -1951,113 +2552,148 @@ async function processTelegramWebhookUpdate(update, env) {
     .first();
 
   if (cmd === '/start') {
+    await clearChatState(env.DB, chatId);
     if (userRow) {
       await sendTelegramMessage(
         env.TELEGRAM_BOT_TOKEN,
         chatId,
-        `👋 Welcome back, <b>${escapeHtml(userRow.name || userRow.email || 'there')}</b>!\n\nCommands:\n• <code>/today</code> — today's agenda\n• <code>/add &lt;title&gt;</code> — quick add\n• <code>/done &lt;n&gt;</code> — mark task done\n• <code>/stats</code> — streak & focus stats\n• <code>/help</code> — command list`
+        `👋 Welcome back, <b>${escapeHtml(userRow.name || userRow.email || 'there')}</b>!\n\nTap any button box below — no need to type commands:`,
+        buildMainReplyKeyboard(true, origin)
       );
     } else {
       await sendTelegramMessage(
         env.TELEGRAM_BOT_TOKEN,
         chatId,
-        '👋 Welcome to <b>TaskFlow</b>!\n\nTo link your personal Google cabinet:\n1. Sign in to TaskFlow on the web\n2. Open <b>Account Cabinet → Telegram</b>\n3. Click <b>Generate Pairing Code</b> and send <code>/link CODE</code> here.'
+        '👋 Welcome to <b>TaskFlow</b>!\n\nTo connect your personal Google cabinet:\n1. Open TaskFlow and sign in with Google\n2. Go to <b>Personal Cabinet → Telegram Bot → Generate Pairing Code</b>\n3. Tap <b>🔗 Enter Pairing Code</b> below and paste the 8-character code.',
+        buildMainReplyKeyboard(false, origin)
       );
     }
     return;
   }
 
-  if (cmd === '/help') {
+  if (cmd === '/help' || rawText === '❓ How to Link') {
+    await clearChatState(env.DB, chatId);
+    if (userRow) {
+      await sendTelegramMessage(
+        env.TELEGRAM_BOT_TOKEN,
+        chatId,
+        `🛠 <b>TaskFlow Controls</b>\n\nJust tap the menu boxes at the bottom:\n• <b>📋 Today's Tasks</b> — interactive task checklist\n• <b>➕ Add Task</b> — type a title with no commands\n• <b>✅ Quick Complete</b> — tap remaining tasks done\n• <b>📊 Progress &amp; Stats</b> — streak &amp; focus stats\n• <b>⏰ Reminders</b> — morning &amp; evening alerts\n\n<i>Slash shortcuts (/today, /add, /done, /stats) also work anytime.</i>`,
+        buildMainReplyKeyboard(true, origin)
+      );
+    } else {
+      await sendTelegramMessage(
+        env.TELEGRAM_BOT_TOKEN,
+        chatId,
+        '🔗 Open <b>TaskFlow → Personal Cabinet → Telegram Bot</b>, generate an 8-character pairing code, tap <b>🔗 Enter Pairing Code</b> below, and paste the code here.',
+        buildMainReplyKeyboard(false, origin)
+      );
+    }
+    return;
+  }
+
+  if (rawText === '🔗 Enter Pairing Code') {
+    await setChatState(env.DB, chatId, 'awaiting_link_code');
     await sendTelegramMessage(
       env.TELEGRAM_BOT_TOKEN,
       chatId,
-      `🛠 <b>TaskFlow Bot Commands</b>\n\n• <code>/today</code> — list today's tasks & progress\n• <code>/add &lt;title&gt;</code> — add a task for today\n• <code>/done &lt;n&gt;</code> — mark today's task #n as done\n• <code>/stats</code> — today, 7-day, and streak stats\n• <code>/link &lt;CODE&gt;</code> — link your Google cabinet\n• <code>/help</code> — show this message`
+      '🔗 Paste your 8-character pairing code now (no <code>/link</code> needed):',
+      { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'act:cancel' }]] }
     );
     return;
   }
 
   if (!userRow) {
+    const chatState = await getChatState(env.DB, chatId);
+    const cleanedCandidate = rawText.replace(/^\/link\s+/i, '').trim().toUpperCase();
+    if (chatState?.action === 'awaiting_link_code' || /^[A-HJ-NP-Z2-9]{8}$/.test(cleanedCandidate)) {
+      await applyPairingCodeForChat(env, chatId, tgUsername, cleanedCandidate, origin);
+      return;
+    }
     await sendTelegramMessage(
       env.TELEGRAM_BOT_TOKEN,
       chatId,
-      '🔗 This chat is not linked to a TaskFlow cabinet yet.\nOpen TaskFlow → Account Cabinet → Telegram to generate a pairing code, then send <code>/link CODE</code>.'
+      '🔗 This chat is not linked to a TaskFlow cabinet yet.\nTap <b>🔗 Enter Pairing Code</b> below after generating your code in TaskFlow.',
+      buildMainReplyKeyboard(false, origin)
     );
     return;
   }
 
   const todayKey = getDateKeyInTimezone(userRow.timezone || DEFAULT_TIMEZONE);
 
-  if (cmd === '/today') {
-    const [tasksRes, settingsRes] = await env.DB.batch([
-      env.DB.prepare(
-        'SELECT * FROM tasks WHERE user_id = ? AND date = ? ORDER BY sort_order ASC, created_at ASC'
-      ).bind(userRow.id, todayKey),
-      env.DB.prepare('SELECT * FROM user_settings WHERE user_id = ?').bind(userRow.id)
-    ]);
-    const text = buildTodaySummaryMessage(
-      userRow,
-      todayKey,
-      tasksRes?.results || [],
-      settingsRes?.results?.[0] || null
+  // Tap-button routes (clear any pending prompt state automatically)
+  if (cmd === '/today' || rawText === "📋 Today's Tasks") {
+    await clearChatState(env.DB, chatId);
+    const { tasks, settingsRow } = await loadTodayTasksAndSettings(env.DB, userRow.id, todayKey);
+    const view = buildTodayChecklistView(userRow, todayKey, tasks, settingsRow, origin, false);
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, view.text, view.inlineKeyboard);
+    return;
+  }
+
+  if (rawText === '✅ Quick Complete') {
+    await clearChatState(env.DB, chatId);
+    const { tasks, settingsRow } = await loadTodayTasksAndSettings(env.DB, userRow.id, todayKey);
+    const view = buildTodayChecklistView(userRow, todayKey, tasks, settingsRow, origin, true);
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, view.text, view.inlineKeyboard);
+    return;
+  }
+
+  if (rawText === '➕ Add Task') {
+    await setChatState(env.DB, chatId, 'awaiting_task_title');
+    await sendTelegramMessage(
+      env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      '➕ <b>New Task for Today</b>\nJust send the task title below — no commands needed:',
+      { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'act:cancel' }]] }
     );
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, text);
+    return;
+  }
+
+  if (cmd === '/stats' || rawText === '📊 Progress & Stats') {
+    await clearChatState(env.DB, chatId);
+    const msg = await computeUserStatsMessage(env.DB, userRow, todayKey);
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, msg, buildStatsInlineKeyboard());
+    return;
+  }
+
+  if (rawText === '⏰ Reminders') {
+    await clearChatState(env.DB, chatId);
+    const view = buildRemindersView(userRow);
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, view.text, view.inlineKeyboard);
     return;
   }
 
   if (cmd === '/add') {
+    await clearChatState(env.DB, chatId);
     if (!arg) {
+      await setChatState(env.DB, chatId, 'awaiting_task_title');
       await sendTelegramMessage(
         env.TELEGRAM_BOT_TOKEN,
         chatId,
-        'Usage: <code>/add Finalize quarterly report</code>'
+        '➕ <b>New Task for Today</b>\nSend your task title below:',
+        { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'act:cancel' }]] }
       );
       return;
     }
 
-    const title = arg.slice(0, 500);
-    const maxRow = await env.DB.prepare(
-      'SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM tasks WHERE user_id = ? AND date = ?'
-    ).bind(userRow.id, todayKey).first();
-    const nextOrder = Number(maxRow?.max_order ?? -1) + 1;
-    const nowIso = new Date().toISOString();
-
-    const task = {
-      id: `task_${crypto.randomUUID()}`,
-      title,
-      notes: '',
-      date: todayKey,
-      timeBlock: 'anytime',
-      scheduledTime: '',
-      estimatedMinutes: 30,
-      actualMinutes: 0,
-      priority: 'medium',
-      category: 'work',
-      status: 'todo',
-      subtasks: [],
-      routineId: null,
-      order: nextOrder,
-      createdAt: nowIso,
-      completedAt: null
-    };
-
-    await buildTaskInsertStmt(env.DB, userRow.id, task).run();
+    const { task, indexInDay } = await createQuickTaskForTelegramUser(env.DB, userRow, todayKey, arg);
+    const card = buildTaskCreatedView(task, indexInDay);
     await sendTelegramMessage(
       env.TELEGRAM_BOT_TOKEN,
       chatId,
-      `✅ Added to <code>${escapeHtml(todayKey)}</code>:\n<b>${escapeHtml(title)}</b>\n\nSend <code>/today</code> to see your full list.`
+      card.text,
+      card.inlineKeyboard
     );
     return;
   }
 
   if (cmd === '/done') {
+    await clearChatState(env.DB, chatId);
     const cleanNum = arg.replace(/^#/, '').trim();
     const idx = parseInt(cleanNum, 10);
     if (!Number.isFinite(idx) || idx < 1 || !/^\d+$/.test(cleanNum)) {
-      await sendTelegramMessage(
-        env.TELEGRAM_BOT_TOKEN,
-        chatId,
-        'Usage: <code>/done 1</code> (use the task number from <code>/today</code>)'
-      );
+      const { tasks, settingsRow } = await loadTodayTasksAndSettings(env.DB, userRow.id, todayKey);
+      const view = buildTodayChecklistView(userRow, todayKey, tasks, settingsRow, origin, true);
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, view.text, view.inlineKeyboard);
       return;
     }
 
@@ -2070,7 +2706,8 @@ async function processTelegramWebhookUpdate(update, env) {
       await sendTelegramMessage(
         env.TELEGRAM_BOT_TOKEN,
         chatId,
-        `Task #${idx} not found. Today has ${tasks.length} task(s) — send <code>/today</code> to inspect.`
+        `Task #${idx} not found. Today has ${tasks.length} task(s).`,
+        { inline_keyboard: [[{ text: "📋 Today's Tasks", callback_data: 'act:today' }]] }
       );
       return;
     }
@@ -2090,21 +2727,44 @@ async function processTelegramWebhookUpdate(update, env) {
     await sendTelegramMessage(
       env.TELEGRAM_BOT_TOKEN,
       chatId,
-      `🎉 Completed #${idx}: <b>${escapeHtml(target.title)}</b>\nToday's progress: <b>${doneCount}/${tasks.length}</b>`
+      `🎉 Completed #${idx}: <b>${escapeHtml(target.title)}</b>\nToday's progress: <b>${doneCount}/${tasks.length}</b>`,
+      { inline_keyboard: [[{ text: '✅ Quick Complete More', callback_data: 'act:quick' }, { text: "📋 Today's Tasks", callback_data: 'act:today' }]] }
     );
     return;
   }
 
-  if (cmd === '/stats') {
-    const msg = await computeUserStatsMessage(env.DB, userRow, todayKey);
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, msg);
+  if (isSlash) {
+    await sendTelegramMessage(
+      env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      'Use the interactive boxes below anytime — no slash commands needed!',
+      buildMainReplyKeyboard(true, origin)
+    );
     return;
   }
 
+  // Plain text handling for linked users: instant add after tapping "➕ Add Task", or 1-tap confirm draft!
+  const chatState = await getChatState(env.DB, chatId);
+  if (chatState?.action === 'awaiting_task_title') {
+    await clearChatState(env.DB, chatId);
+    const { task, indexInDay } = await createQuickTaskForTelegramUser(env.DB, userRow, todayKey, rawText);
+    const card = buildTaskCreatedView(task, indexInDay);
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, card.text, card.inlineKeyboard);
+    return;
+  }
+
+  const trimmedDraft = rawText.slice(0, 500);
+  await setChatState(env.DB, chatId, 'confirm_draft', trimmedDraft);
   await sendTelegramMessage(
     env.TELEGRAM_BOT_TOKEN,
     chatId,
-    `Unknown command. Send <code>/help</code> to see available commands.`
+    `💡 Add this as a task for today?\n<b>${escapeHtml(truncateButtonLabel(trimmedDraft, 120))}</b>`,
+    {
+      inline_keyboard: [[
+        { text: '✅ Yes, Add Task', callback_data: 'act:save_draft' },
+        { text: '❌ Dismiss', callback_data: 'act:cancel' }
+      ]]
+    }
   );
 }
 
@@ -2123,7 +2783,8 @@ async function handleTelegramWebhook(request, env, ctx) {
     return errorResponse(400, parsed.error, 'INVALID_JSON');
   }
 
-  const work = processTelegramWebhookUpdate(parsed.data, env).catch((err) => {
+  const origin = new URL(request.url).origin;
+  const work = processTelegramWebhookUpdate(parsed.data, env, origin).catch((err) => {
     console.error('Telegram webhook processing error:', err);
   });
 

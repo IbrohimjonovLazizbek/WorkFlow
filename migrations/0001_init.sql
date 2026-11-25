@@ -84,3 +84,10 @@ CREATE TABLE IF NOT EXISTS telegram_link_codes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_telegram_link_codes_user ON telegram_link_codes(user_id);
+
+CREATE TABLE IF NOT EXISTS telegram_chat_states (
+  chat_id TEXT PRIMARY KEY,
+  action TEXT,
+  draft_text TEXT,
+  updated_at TEXT NOT NULL
+);

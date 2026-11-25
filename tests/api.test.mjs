@@ -540,10 +540,27 @@ describe('Telegram pairing, webhook commands, Mini App auth & Cron Worker', () =
 
     // 3. Mock outbound Telegram API calls and drive webhook commands
     const sentMessages = [];
+    const editedMessages = [];
+    const answeredCallbacks = [];
     const restore = mockFetch(async (url, opts) => {
-      if (String(url).includes('/sendMessage')) {
+      const urlStr = String(url);
+      if (urlStr.includes('/sendMessage')) {
         sentMessages.push(JSON.parse(opts.body));
         return new Response(JSON.stringify({ ok: true, result: { message_id: sentMessages.length } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (urlStr.includes('/editMessageText')) {
+        editedMessages.push(JSON.parse(opts.body));
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (urlStr.includes('/answerCallbackQuery')) {
+        answeredCallbacks.push(JSON.parse(opts.body));
+        return new Response(JSON.stringify({ ok: true, result: true }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' }
         });
@@ -638,6 +655,106 @@ describe('Telegram pairing, webhook commands, Mini App auth & Cron Worker', () =
       const healthRes = await cronWorker.fetch(new Request('https://cron.example.com/health'));
       assert.equal(healthRes.status, 200);
       assert.equal((await healthRes.json()).ok, true);
+
+      // Verify persistent reply keyboard returned on pairing message & cron inline keyboard
+      assert.ok(sentMessages[0].reply_markup?.keyboard);
+      assert.equal(sentMessages[0].reply_markup.keyboard[0][0].text, "📋 Today's Tasks");
+      const cronSentMsg = sentMessages[sentMessages.length - 1];
+      assert.ok(cronSentMsg.reply_markup?.inline_keyboard);
+
+      // Tap "➕ Add Task" box -> send plain text without slash -> tap priority/time block boxes -> toggle via inline box
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: { message: { chat: { id: 99887766 }, from: { id: 99887766 }, text: '➕ Add Task' } }
+      });
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: { message: { chat: { id: 99887766 }, from: { id: 99887766 }, text: 'Plan sprint backlog' } }
+      });
+      const addedCardMsg = sentMessages[sentMessages.length - 1];
+      assert.match(addedCardMsg.text, /Plan sprint backlog/);
+      const highBtn = addedCardMsg.reply_markup?.inline_keyboard?.[0]?.[0];
+      assert.match(highBtn.callback_data, /^tp:/);
+
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: {
+          callback_query: {
+            id: 'cb_1',
+            from: { id: 99887766 },
+            data: highBtn.callback_data,
+            message: { message_id: 42, chat: { id: 99887766 }, reply_markup: addedCardMsg.reply_markup }
+          }
+        }
+      });
+      assert.equal(answeredCallbacks.length, 1);
+      assert.equal(editedMessages.length, 1);
+      assert.match(editedMessages[0].text, /🔴 High/);
+
+      // Tap "📋 Today's Tasks" and toggle first task via inline button
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: { message: { chat: { id: 99887766 }, from: { id: 99887766 }, text: "📋 Today's Tasks" } }
+      });
+      const todayBoxMsg = sentMessages[sentMessages.length - 1];
+      const toggleBtn = todayBoxMsg.reply_markup?.inline_keyboard?.[0]?.[0];
+      assert.match(toggleBtn.callback_data, /^t:/);
+
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: {
+          callback_query: {
+            id: 'cb_2',
+            from: { id: 99887766 },
+            data: toggleBtn.callback_data,
+            message: { message_id: 43, chat: { id: 99887766 }, reply_markup: todayBoxMsg.reply_markup }
+          }
+        }
+      });
+      assert.equal(answeredCallbacks.length, 2);
+      assert.equal(editedMessages.length, 2);
+
+      // Tap "⏰ Reminders" and adjust morning hour via inline box
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: { message: { chat: { id: 99887766 }, from: { id: 99887766 }, text: '⏰ Reminders' } }
+      });
+      const remMsg = sentMessages[sentMessages.length - 1];
+      assert.ok(remMsg.reply_markup?.inline_keyboard);
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: {
+          callback_query: {
+            id: 'cb_3',
+            from: { id: 99887766 },
+            data: 'rem:mh:1',
+            message: { message_id: 44, chat: { id: 99887766 }, reply_markup: remMsg.reply_markup }
+          }
+        }
+      });
+      const meRemUpdated = await call(env, 'GET', '/api/auth/me', { headers: { Cookie: cookieA } });
+      assert.equal(meRemUpdated.data.user.morningReminderHour, 9);
+
+      // Plain random text offers confirmation draft box and act:save_draft creates the task
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: { message: { chat: { id: 99887766 }, from: { id: 99887766 }, text: 'Buy notebook' } }
+      });
+      const draftPrompt = sentMessages[sentMessages.length - 1];
+      assert.equal(draftPrompt.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data, 'act:save_draft');
+      await call(env, 'POST', '/api/telegram/webhook', {
+        headers: hookHeaders,
+        body: {
+          callback_query: {
+            id: 'cb_4',
+            from: { id: 99887766 },
+            data: 'act:save_draft',
+            message: { message_id: 45, chat: { id: 99887766 }, reply_markup: draftPrompt.reply_markup }
+          }
+        }
+      });
+      const wsFinal = await call(env, 'GET', '/api/workspace', { headers: { Cookie: cookieA } });
+      assert.equal(wsFinal.data.tasks.some((t) => t.title === 'Buy notebook'), true);
     } finally {
       restore();
     }
