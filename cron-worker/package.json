@@ -1,0 +1,14 @@
+{
+  "name": "taskflow-cron-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "cf workers dev",
+    "deploy": "cf workers deploy",
+    "check": "node --check src/index.js"
+  },
+  "devDependencies": {
+    "cf": "^1.0.0-rc.5"
+  }
+}

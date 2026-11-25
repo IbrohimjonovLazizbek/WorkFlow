@@ -3,7 +3,8 @@
 
   var TaskFlow = global.TaskFlow = global.TaskFlow || {};
 
-  var STORAGE_KEY = 'taskflow_state_v1';
+  var GUEST_STORAGE_KEY = 'taskflow_state_v1';
+  var CLOUD_CACHE_PREFIX = 'taskflow_cloud_cache_v1_';
   var VALID_VIEWS = ['today', 'upcoming', 'analytics', 'routines'];
   var VALID_THEMES = ['light', 'dark'];
   var VALID_TIME_BLOCKS = ['morning', 'afternoon', 'evening', 'anytime'];
@@ -278,6 +279,30 @@
     };
   }
 
+  function normalizeUser(raw) {
+    if (!raw || typeof raw !== 'object' || !raw.id) return null;
+    return {
+      id: String(raw.id),
+      email: raw.email ? String(raw.email) : '',
+      name: raw.name ? String(raw.name) : (raw.email ? String(raw.email).split('@')[0] : 'TaskFlow User'),
+      avatarUrl: raw.avatarUrl || raw.avatar_url || '',
+      timezone: raw.timezone ? String(raw.timezone) : 'Asia/Tashkent',
+      telegramChatId: raw.telegramChatId !== undefined ? raw.telegramChatId : (raw.telegram_chat_id || null),
+      telegramUsername: raw.telegramUsername !== undefined ? raw.telegramUsername : (raw.telegram_username || null),
+      telegramNotificationsEnabled: raw.telegramNotificationsEnabled !== undefined
+        ? Boolean(raw.telegramNotificationsEnabled)
+        : (raw.telegram_notifications_enabled !== undefined ? Boolean(raw.telegram_notifications_enabled) : true),
+      morningReminderHour: clamp(
+        Math.round(raw.morningReminderHour !== undefined ? raw.morningReminderHour : (raw.morning_reminder_hour !== undefined ? raw.morning_reminder_hour : 8)),
+        0, 23
+      ),
+      eveningReminderHour: clamp(
+        Math.round(raw.eveningReminderHour !== undefined ? raw.eveningReminderHour : (raw.evening_reminder_hour !== undefined ? raw.evening_reminder_hour : 21)),
+        0, 23
+      )
+    };
+  }
+
   function createEmptyState() {
     return {
       version: 1,
@@ -382,18 +407,16 @@
       return dateStr + 'T' + (hhmm || '17:00') + ':00.000Z';
     }
 
-    // Past 14 days: -14 to -1
     for (var offset = -14; offset <= -1; offset += 1) {
       var dStr = addDays(today, offset);
       var dayIdx = offset + 14;
       var order = 0;
 
-      // Apply morning & midday routines on past days
       var morningRtn = routines[0];
       var middayRtn = routines[2];
       var eveningRtn = routines[3];
 
-      var missDay = offset === -9; // 1 lighter dip day 9 days ago so streak is an authentic 8-day active streak!
+      var missDay = offset === -9;
 
       tasks.push({
         id: 'seed_t_' + (seq++),
@@ -487,7 +510,6 @@
         });
       }
 
-      // Add 2-3 varied daily tasks
       var countExtra = missDay ? 1 : (2 + (dayIdx % 3));
       for (var k = 0; k < countExtra; k += 1) {
         var tpl = pastTemplates[(dayIdx * 3 + k) % pastTemplates.length];
@@ -532,7 +554,6 @@
       }
     }
 
-    // Today's tasks (seed 3 routine-backed tasks + 4 focus tasks, leaving 1 routine unapplied so "Apply Daily Routines (+1)" works cleanly!)
     var todayOrder = 0;
     tasks.push(
       {
@@ -687,7 +708,6 @@
       updatedAt: makePastTimestamp(today, '08:30')
     };
 
-    // Tomorrow & upcoming tasks (+1 to +3)
     var tmrw = addDays(today, 1);
     var day2 = addDays(today, 2);
     var day3 = addDays(today, 3);
@@ -785,31 +805,55 @@
   }
 
   /* =========================================================================
-   * Store State, Persistence, Undo & Listeners
+   * Store State, Persistence, Cloud Sync & Listeners
    * ========================================================================= */
   var listeners = [];
   var undoStack = [];
   var MAX_UNDO = 25;
+  var currentStorageKey = GUEST_STORAGE_KEY;
+
+  var authState = {
+    mode: 'guest', // 'guest' | 'cloud'
+    authenticated: false,
+    user: null,
+    authStatus: {
+      googleConfigured: false,
+      telegramConfigured: false,
+      telegramBotUsername: null,
+      origin: ''
+    },
+    syncState: 'local', // 'local' | 'syncing' | 'synced' | 'error'
+    lastSyncError: null,
+    lastSyncedAt: null
+  };
+
+  var pendingSyncOps = 0;
+  var syncChain = Promise.resolve();
 
   function cloneData(val) {
     return JSON.parse(JSON.stringify(val));
   }
 
-  function loadInitialState() {
-    try {
-      var raw = global.localStorage ? global.localStorage.getItem(STORAGE_KEY) : null;
-      if (!raw) {
-        var seed = createSeedState();
-        saveToStorage(seed);
-        return seed;
-      }
-      var parsed = JSON.parse(raw);
-      return sanitizeFullState(parsed);
-    } catch (e) {
-      var fallback = createSeedState();
-      saveToStorage(fallback);
-      return fallback;
+  function sanitizeReflectionsMap(rawRefs) {
+    var reflections = {};
+    if (Array.isArray(rawRefs)) {
+      rawRefs.forEach(function (item) {
+        if (item && isValidDateKey(item.date)) {
+          var norm = normalizeReflection(item);
+          if (norm) reflections[item.date] = norm;
+        }
+      });
+      return reflections;
     }
+    if (rawRefs && typeof rawRefs === 'object') {
+      Object.keys(rawRefs).forEach(function (dateKey) {
+        if (isValidDateKey(dateKey)) {
+          var norm = normalizeReflection(rawRefs[dateKey]);
+          if (norm) reflections[dateKey] = norm;
+        }
+      });
+    }
+    return reflections;
   }
 
   function sanitizeFullState(parsed) {
@@ -821,15 +865,7 @@
     var routines = Array.isArray(parsed.routines)
       ? parsed.routines.map(normalizeRoutine).filter(Boolean)
       : [];
-    var reflections = {};
-    if (parsed.reflections && typeof parsed.reflections === 'object') {
-      Object.keys(parsed.reflections).forEach(function (dateKey) {
-        if (isValidDateKey(dateKey)) {
-          var norm = normalizeReflection(parsed.reflections[dateKey]);
-          if (norm) reflections[dateKey] = norm;
-        }
-      });
-    }
+    var reflections = sanitizeReflectionsMap(parsed.reflections);
 
     return {
       version: 1,
@@ -845,17 +881,38 @@
     };
   }
 
-  function saveToStorage(nextState) {
+  function readStorageKey(key) {
+    try {
+      if (!global.localStorage) return null;
+      var raw = global.localStorage.getItem(key);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function saveToStorage(key, nextState) {
     try {
       if (global.localStorage) {
-        global.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+        global.localStorage.setItem(key, JSON.stringify(nextState));
       }
     } catch (e) {
       /* ignore quota or privacy-mode storage errors cleanly */
     }
   }
 
-  var state = loadInitialState();
+  function loadInitialGuestState() {
+    var parsed = readStorageKey(GUEST_STORAGE_KEY);
+    if (!parsed) {
+      var seed = createSeedState();
+      saveToStorage(GUEST_STORAGE_KEY, seed);
+      return seed;
+    }
+    return sanitizeFullState(parsed);
+  }
+
+  var state = loadInitialGuestState();
 
   function getState() {
     return {
@@ -870,6 +927,107 @@
       filters: Object.assign({}, state.filters),
       isSampleData: state.isSampleData
     };
+  }
+
+  function getAuthState() {
+    return {
+      mode: authState.mode,
+      authenticated: authState.authenticated,
+      user: authState.user ? Object.assign({}, authState.user) : null,
+      authStatus: Object.assign({}, authState.authStatus),
+      syncState: authState.syncState,
+      lastSyncError: authState.lastSyncError,
+      lastSyncedAt: authState.lastSyncedAt
+    };
+  }
+
+  function getSyncState() {
+    return authState.syncState;
+  }
+
+  function isCloudActive() {
+    return authState.mode === 'cloud' && authState.authenticated && Boolean(authState.user);
+  }
+
+  function notifyListeners(reason) {
+    var snapshot = getState();
+    for (var i = 0; i < listeners.length; i += 1) {
+      try {
+        listeners[i](snapshot, { reason: reason || 'update' });
+      } catch (err) {
+        if (global.console && global.console.error) {
+          global.console.error('TaskFlow listener error:', err);
+        }
+      }
+    }
+  }
+
+  function apiRequest(path, method, body) {
+    if (typeof global.fetch !== 'function') {
+      return Promise.resolve({ ok: true, skipped: true });
+    }
+    var opts = {
+      method: method || 'GET',
+      credentials: 'same-origin',
+      headers: {}
+    };
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    return global.fetch(path, opts).then(function (res) {
+      if (!res.ok) {
+        return res.text().then(function (txt) {
+          var msg = 'Sync failed (' + res.status + ')';
+          try {
+            var parsed = JSON.parse(txt);
+            if (parsed && parsed.error) msg = parsed.error;
+          } catch (e) {
+            /* ignore non-JSON error body */
+          }
+          var err = new Error(msg);
+          err.status = res.status;
+          throw err;
+        });
+      }
+      var ct = res.headers && res.headers.get ? (res.headers.get('content-type') || '') : '';
+      if (ct.indexOf('application/json') !== -1) {
+        return res.json();
+      }
+      return { ok: true };
+    });
+  }
+
+  function queueCloudOp(fn) {
+    if (!isCloudActive() || typeof global.fetch !== 'function') return Promise.resolve();
+    var opUserId = authState.user.id;
+    pendingSyncOps += 1;
+    if (authState.syncState !== 'syncing') {
+      authState.syncState = 'syncing';
+      notifyListeners('sync');
+    }
+
+    syncChain = syncChain.then(function () {
+      if (!isCloudActive() || !authState.user || authState.user.id !== opUserId) return null;
+      return fn();
+    }).then(function () {
+      pendingSyncOps = Math.max(0, pendingSyncOps - 1);
+      if (pendingSyncOps === 0 && isCloudActive() && authState.user && authState.user.id === opUserId) {
+        authState.syncState = 'synced';
+        authState.lastSyncError = null;
+        authState.lastSyncedAt = new Date().toISOString();
+        notifyListeners('sync');
+      }
+    }).catch(function (err) {
+      pendingSyncOps = Math.max(0, pendingSyncOps - 1);
+      if (isCloudActive() && authState.user && authState.user.id === opUserId) {
+        authState.syncState = 'error';
+        authState.lastSyncError = err && err.message ? err.message : 'Cloud sync error';
+        notifyListeners('sync');
+      }
+    });
+
+    return syncChain;
   }
 
   function pushUndoSnapshot(label) {
@@ -889,17 +1047,8 @@
   }
 
   function commit(reason) {
-    saveToStorage(state);
-    var snapshot = getState();
-    for (var i = 0; i < listeners.length; i += 1) {
-      try {
-        listeners[i](snapshot, { reason: reason || 'update' });
-      } catch (err) {
-        if (global.console && global.console.error) {
-          global.console.error('TaskFlow listener error:', err);
-        }
-      }
-    }
+    saveToStorage(currentStorageKey, state);
+    notifyListeners(reason || 'update');
   }
 
   function subscribe(fn) {
@@ -909,6 +1058,153 @@
       var idx = listeners.indexOf(fn);
       if (idx !== -1) listeners.splice(idx, 1);
     };
+  }
+
+  /* =========================================================================
+   * Multi-User Auth Session & Workspace Switching
+   * ========================================================================= */
+  function initAuthSession(statusObj) {
+    if (statusObj && typeof statusObj === 'object') {
+      authState.authStatus = {
+        googleConfigured: Boolean(statusObj.googleConfigured),
+        telegramConfigured: Boolean(statusObj.telegramConfigured),
+        telegramBotUsername: statusObj.telegramBotUsername || null,
+        origin: statusObj.origin || ''
+      };
+    }
+    notifyListeners('authStatus');
+  }
+
+  function setCloudWorkspace(userObj, workspaceData) {
+    var normUser = normalizeUser(userObj);
+    if (!normUser) return;
+
+    var prevTheme = state.theme;
+    var prevView = state.activeView;
+    var cacheKey = CLOUD_CACHE_PREFIX + normUser.id;
+    var cached = readStorageKey(cacheKey);
+    var ws = workspaceData && typeof workspaceData === 'object' ? workspaceData : (cached || {});
+
+    currentStorageKey = cacheKey;
+    undoStack = [];
+    pendingSyncOps = 0;
+
+    var clean = sanitizeFullState({
+      version: 1,
+      selectedDate: (cached && cached.selectedDate) || todayKey(),
+      activeView: prevView || (cached && cached.activeView) || 'today',
+      theme: prevTheme || (cached && cached.theme) || 'light',
+      settings: ws.settings || (cached && cached.settings) || defaultSettings(),
+      tasks: Array.isArray(ws.tasks) ? ws.tasks : ((cached && cached.tasks) || []),
+      routines: Array.isArray(ws.routines) ? ws.routines : ((cached && cached.routines) || []),
+      reflections: ws.reflections || (cached && cached.reflections) || {},
+      filters: (cached && cached.filters) || defaultFilters(),
+      isSampleData: false
+    });
+
+    state = clean;
+    authState.mode = 'cloud';
+    authState.authenticated = true;
+    authState.user = normUser;
+    authState.syncState = 'synced';
+    authState.lastSyncError = null;
+    authState.lastSyncedAt = new Date().toISOString();
+
+    saveToStorage(currentStorageKey, state);
+    notifyListeners('authSwitch');
+  }
+
+  function setGuestMode() {
+    var prevTheme = state.theme;
+    var prevView = state.activeView;
+
+    currentStorageKey = GUEST_STORAGE_KEY;
+    undoStack = [];
+    pendingSyncOps = 0;
+
+    var guestState = loadInitialGuestState();
+    if (VALID_THEMES.indexOf(prevTheme) !== -1) guestState.theme = prevTheme;
+    if (VALID_VIEWS.indexOf(prevView) !== -1) guestState.activeView = prevView;
+    state = guestState;
+
+    authState.mode = 'guest';
+    authState.authenticated = false;
+    authState.user = null;
+    authState.syncState = 'local';
+    authState.lastSyncError = null;
+    authState.lastSyncedAt = null;
+
+    saveToStorage(currentStorageKey, state);
+    notifyListeners('authSwitch');
+  }
+
+  function updateUserProfile(partial) {
+    if (!authState.user || !partial || typeof partial !== 'object') return;
+    authState.user = normalizeUser(Object.assign({}, authState.user, partial));
+    notifyListeners('sync');
+  }
+
+  function getLocalGuestSummary() {
+    var raw = readStorageKey(GUEST_STORAGE_KEY);
+    if (!raw || typeof raw !== 'object') {
+      return { tasksCount: 0, routinesCount: 0, isSampleData: false };
+    }
+    var tasks = Array.isArray(raw.tasks) ? raw.tasks : [];
+    var routines = Array.isArray(raw.routines) ? raw.routines : [];
+    return {
+      tasksCount: tasks.length,
+      routinesCount: routines.length,
+      isSampleData: Boolean(raw.isSampleData)
+    };
+  }
+
+  function hasLocalGuestTasks() {
+    return getLocalGuestSummary().tasksCount > 0;
+  }
+
+  function importLocalGuestToCloud(mode) {
+    if (!isCloudActive()) {
+      return Promise.resolve({ ok: false, error: 'Sign in with Google first to import to cloud.' });
+    }
+    var guestRaw = readStorageKey(GUEST_STORAGE_KEY);
+    if (!guestRaw || typeof guestRaw !== 'object') {
+      return Promise.resolve({ ok: false, error: 'No local guest workspace found.' });
+    }
+    var guest = sanitizeFullState(guestRaw);
+    var importMode = mode === 'replace' ? 'replace' : 'merge';
+
+    authState.syncState = 'syncing';
+    notifyListeners('sync');
+
+    return apiRequest('/api/workspace/import', 'POST', {
+      mode: importMode,
+      tasks: guest.tasks,
+      routines: guest.routines,
+      reflections: guest.reflections,
+      settings: guest.settings
+    }).then(function () {
+      return apiRequest('/api/workspace', 'GET');
+    }).then(function (ws) {
+      if (ws && ws.user) {
+        setCloudWorkspace(ws.user, ws);
+      } else {
+        setCloudWorkspace(authState.user, ws || {});
+      }
+      return {
+        ok: true,
+        tasksCount: guest.tasks.length,
+        routinesCount: guest.routines.length
+      };
+    }).catch(function (err) {
+      authState.syncState = 'error';
+      authState.lastSyncError = err && err.message ? err.message : 'Import failed';
+      notifyListeners('sync');
+      return { ok: false, error: authState.lastSyncError };
+    });
+  }
+
+  function bootstrap() {
+    return getState();
   }
 
   /* =========================================================================
@@ -930,12 +1226,30 @@
     if (VALID_THEMES.indexOf(theme) === -1 || state.theme === theme) return;
     state.theme = theme;
     commit('theme');
+    if (currentStorageKey !== GUEST_STORAGE_KEY) {
+      var guestRaw = readStorageKey(GUEST_STORAGE_KEY);
+      if (guestRaw && typeof guestRaw === 'object') {
+        guestRaw.theme = theme;
+        saveToStorage(GUEST_STORAGE_KEY, guestRaw);
+      }
+    }
   }
 
   function updateSettings(partial) {
     if (!partial || typeof partial !== 'object') return;
     state.settings = normalizeSettings(Object.assign({}, state.settings, partial));
     commit('settings');
+    if (isCloudActive()) {
+      var u = authState.user;
+      queueCloudOp(function () {
+        return apiRequest('/api/settings', 'PUT', Object.assign({}, state.settings, {
+          timezone: u.timezone,
+          telegramNotificationsEnabled: u.telegramNotificationsEnabled,
+          morningReminderHour: u.morningReminderHour,
+          eveningReminderHour: u.eveningReminderHour
+        }));
+      });
+    }
   }
 
   function setFilters(partial) {
@@ -1055,16 +1369,26 @@
     pushUndoSnapshot('Moved rollover tasks');
     var nextOrd = nextOrderForDate(target);
     var moved = 0;
+    var movedTasks = [];
 
     state.tasks = state.tasks.map(function (t) {
       if (idSet[t.id] && t.date !== target) {
         moved += 1;
-        return Object.assign({}, t, { date: target, order: nextOrd++ });
+        var nextTask = Object.assign({}, t, { date: target, order: nextOrd++ });
+        movedTasks.push(nextTask);
+        return nextTask;
       }
       return t;
     });
 
-    if (moved > 0) commit('rollover');
+    if (moved > 0) {
+      commit('rollover');
+      if (isCloudActive()) {
+        queueCloudOp(function () {
+          return apiRequest('/api/tasks/batch', 'POST', { action: 'upsertMany', tasks: movedTasks });
+        });
+      }
+    }
     return moved;
   }
 
@@ -1077,6 +1401,11 @@
 
     state.tasks = state.tasks.concat([task]);
     commit('addTask');
+    if (isCloudActive()) {
+      queueCloudOp(function () {
+        return apiRequest('/api/tasks', 'POST', task);
+      });
+    }
     return task;
   }
 
@@ -1085,6 +1414,28 @@
       if (state.tasks[i].id === id) return i;
     }
     return -1;
+  }
+
+  function syncTaskPatch(taskObj) {
+    if (!isCloudActive() || !taskObj) return;
+    queueCloudOp(function () {
+      return apiRequest('/api/tasks/' + encodeURIComponent(taskObj.id), 'PATCH', {
+        title: taskObj.title,
+        notes: taskObj.notes,
+        date: taskObj.date,
+        timeBlock: taskObj.timeBlock,
+        scheduledTime: taskObj.scheduledTime,
+        estimatedMinutes: taskObj.estimatedMinutes,
+        actualMinutes: taskObj.actualMinutes,
+        priority: taskObj.priority,
+        category: taskObj.category,
+        status: taskObj.status,
+        subtasks: taskObj.subtasks,
+        routineId: taskObj.routineId,
+        order: taskObj.order,
+        completedAt: taskObj.completedAt
+      });
+    });
   }
 
   function updateTask(id, patch) {
@@ -1111,6 +1462,7 @@
     nextTasks[idx] = updated;
     state.tasks = nextTasks;
     commit('updateTask');
+    syncTaskPatch(updated);
     return updated;
   }
 
@@ -1129,6 +1481,11 @@
     pushUndoSnapshot('Task deleted');
     state.tasks = state.tasks.filter(function (t) { return t.id !== id; });
     commit('deleteTask');
+    if (isCloudActive()) {
+      queueCloudOp(function () {
+        return apiRequest('/api/tasks/' + encodeURIComponent(id), 'DELETE');
+      });
+    }
     return removed;
   }
 
@@ -1157,6 +1514,17 @@
     state.tasks = state.tasks.concat([copy]);
     reindexDateTasks(orig.date);
     commit('duplicateTask');
+
+    if (isCloudActive()) {
+      var dayUpdates = getTasksForDate(orig.date).map(function (t) {
+        return { id: t.id, order: t.order, timeBlock: t.timeBlock, date: t.date };
+      });
+      queueCloudOp(function () {
+        return apiRequest('/api/tasks', 'POST', copy).then(function () {
+          return apiRequest('/api/tasks/batch', 'POST', { action: 'reorder', updates: dayUpdates });
+        });
+      });
+    }
     return copy;
   }
 
@@ -1205,8 +1573,10 @@
     dayTasks.splice(insertPos, 0, updatedDrag);
 
     var orderMap = {};
+    var updates = [];
     dayTasks.forEach(function (t, i) {
       orderMap[t.id] = { order: i, timeBlock: t.timeBlock, date: dateStr };
+      updates.push({ id: t.id, order: i, timeBlock: t.timeBlock, date: dateStr });
     });
 
     state.tasks = state.tasks.map(function (t) {
@@ -1217,6 +1587,11 @@
     });
 
     commit('reorderTask');
+    if (isCloudActive()) {
+      queueCloudOp(function () {
+        return apiRequest('/api/tasks/batch', 'POST', { action: 'reorder', updates: updates });
+      });
+    }
     return true;
   }
 
@@ -1256,6 +1631,15 @@
     });
     reindexDateTasks(task.date);
     commit('moveTaskOrder');
+
+    if (isCloudActive()) {
+      var updates = getTasksForDate(task.date).map(function (t) {
+        return { id: t.id, order: t.order, timeBlock: t.timeBlock, date: t.date };
+      });
+      queueCloudOp(function () {
+        return apiRequest('/api/tasks/batch', 'POST', { action: 'reorder', updates: updates });
+      });
+    }
     return true;
   }
 
@@ -1275,6 +1659,7 @@
     nextTasks[idx] = updated;
     state.tasks = nextTasks;
     commit('addSubtask');
+    syncTaskPatch(updated);
     return sub;
   }
 
@@ -1297,6 +1682,7 @@
     nextTasks[idx] = updated;
     state.tasks = nextTasks;
     commit('toggleSubtask');
+    syncTaskPatch(updated);
     return updated;
   }
 
@@ -1312,6 +1698,7 @@
     nextTasks[idx] = updated;
     state.tasks = nextTasks;
     commit('deleteSubtask');
+    syncTaskPatch(updated);
     return updated;
   }
 
@@ -1323,6 +1710,11 @@
     if (!routine) return null;
     state.routines = state.routines.concat([routine]);
     commit('addRoutine');
+    if (isCloudActive()) {
+      queueCloudOp(function () {
+        return apiRequest('/api/routines', 'POST', routine);
+      });
+    }
     return routine;
   }
 
@@ -1336,7 +1728,14 @@
       }
       return r;
     });
-    if (found) commit('updateRoutine');
+    if (found) {
+      commit('updateRoutine');
+      if (isCloudActive()) {
+        queueCloudOp(function () {
+          return apiRequest('/api/routines/' + encodeURIComponent(id), 'PATCH', found);
+        });
+      }
+    }
     return found;
   }
 
@@ -1352,6 +1751,11 @@
     pushUndoSnapshot('Routine deleted');
     state.routines = state.routines.filter(function (r) { return r.id !== id; });
     commit('deleteRoutine');
+    if (isCloudActive()) {
+      queueCloudOp(function () {
+        return apiRequest('/api/routines/' + encodeURIComponent(id), 'DELETE');
+      });
+    }
     return true;
   }
 
@@ -1401,6 +1805,11 @@
     if (created.length > 0) {
       state.tasks = state.tasks.concat(created);
       commit('applyRoutines');
+      if (isCloudActive()) {
+        queueCloudOp(function () {
+          return apiRequest('/api/tasks/batch', 'POST', { action: 'upsertMany', tasks: created });
+        });
+      }
     }
     return created;
   }
@@ -1425,7 +1834,6 @@
     var today = todayKey();
     var streak = 0;
 
-    // Look back up to 90 days; today doesn't break streak if not completed yet
     for (var offset = 0; offset < 90; offset += 1) {
       var dStr = addDays(today, -offset);
       if (schedule === 'weekdays' && !isWeekday(dStr)) {
@@ -1450,12 +1858,35 @@
     nextReflections[target] = next;
     state.reflections = nextReflections;
     commit('saveReflection');
+    if (isCloudActive()) {
+      queueCloudOp(function () {
+        return apiRequest('/api/reflections/' + encodeURIComponent(target), 'PUT', {
+          mood: next.mood,
+          intention: next.intention,
+          reflection: next.reflection
+        });
+      });
+    }
     return next;
   }
 
   /* =========================================================================
    * Undo, Clear, Reset, Export & Import
    * ========================================================================= */
+  function syncFullSnapshotToCloud() {
+    if (!isCloudActive()) return;
+    var payload = {
+      mode: 'replace',
+      tasks: state.tasks,
+      routines: state.routines,
+      reflections: state.reflections,
+      settings: state.settings
+    };
+    queueCloudOp(function () {
+      return apiRequest('/api/workspace/import', 'POST', payload);
+    });
+  }
+
   function canUndo() {
     return undoStack.length > 0;
   }
@@ -1470,6 +1901,7 @@
     state.reflections = snap.reflections;
     state.isSampleData = snap.isSampleData;
     commit('undo');
+    syncFullSnapshotToCloud();
     return true;
   }
 
@@ -1482,6 +1914,7 @@
     state.isSampleData = false;
     state.selectedDate = todayKey();
     commit('clearSampleData');
+    syncFullSnapshotToCloud();
   }
 
   function resetDemoData() {
@@ -1490,25 +1923,31 @@
     state.tasks = seed.tasks;
     state.routines = seed.routines;
     state.reflections = seed.reflections;
-    state.isSampleData = true;
+    state.isSampleData = isCloudActive() ? false : true;
     state.selectedDate = todayKey();
     commit('resetDemoData');
+    syncFullSnapshotToCloud();
   }
 
   function clearCompletedForDate(dateStr) {
     var target = isValidDateKey(dateStr) ? dateStr : state.selectedDate;
-    var count = 0;
+    var removedIds = [];
     state.tasks.forEach(function (t) {
-      if (t.date === target && t.status === 'done') count += 1;
+      if (t.date === target && t.status === 'done') removedIds.push(t.id);
     });
-    if (count === 0) return 0;
+    if (removedIds.length === 0) return 0;
 
     pushUndoSnapshot('Cleared completed tasks');
     state.tasks = state.tasks.filter(function (t) {
       return !(t.date === target && t.status === 'done');
     });
     commit('clearCompleted');
-    return count;
+    if (isCloudActive()) {
+      queueCloudOp(function () {
+        return apiRequest('/api/tasks/batch', 'POST', { action: 'deleteMany', ids: removedIds });
+      });
+    }
+    return removedIds.length;
   }
 
   function exportJSON() {
@@ -1569,8 +2008,12 @@
 
     pushUndoSnapshot('Imported backup');
     var cleanState = sanitizeFullState(parsed);
+    if (isCloudActive()) {
+      cleanState.isSampleData = false;
+    }
     state = cleanState;
     commit('importJSON');
+    syncFullSnapshotToCloud();
     return {
       ok: true,
       tasksCount: state.tasks.length,
@@ -1804,7 +2247,6 @@
     var weekCount = clamp(Math.round(Number(weeks) || 12), 1, 52);
     var today = todayKey();
     var todayDt = parseDateKey(today);
-    // Monday = 0 .. Sunday = 6
     var todayMonOffset = (todayDt.getDay() + 6) % 7;
     var currentWeekMonday = addDays(today, -todayMonOffset);
     var startMonday = addDays(currentWeekMonday, -(weekCount - 1) * 7);
@@ -1930,6 +2372,16 @@
   var Store = {
     getState: getState,
     subscribe: subscribe,
+    bootstrap: bootstrap,
+    initAuthSession: initAuthSession,
+    setCloudWorkspace: setCloudWorkspace,
+    setGuestMode: setGuestMode,
+    updateUserProfile: updateUserProfile,
+    getAuthState: getAuthState,
+    getSyncState: getSyncState,
+    hasLocalGuestTasks: hasLocalGuestTasks,
+    getLocalGuestSummary: getLocalGuestSummary,
+    importLocalGuestToCloud: importLocalGuestToCloud,
     setSelectedDate: setSelectedDate,
     setActiveView: setActiveView,
     setTheme: setTheme,

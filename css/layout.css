@@ -10,6 +10,10 @@
   background-color: var(--bg-canvas);
 }
 
+.app-shell[hidden] {
+  display: none !important;
+}
+
 /* --------------------------------------------------------------------------
    Sidebar
    -------------------------------------------------------------------------- */
@@ -360,6 +364,138 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Sidebar User Cabinet Card */
+#sidebar-user-cabinet,
+.sidebar-cabinet {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2-5);
+  width: 100%;
+  padding: var(--space-2-5);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-xs);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+}
+
+.sidebar-cabinet:hover {
+  background-color: var(--bg-surface-hover);
+  border-color: var(--border-default);
+  box-shadow: var(--shadow-sm);
+}
+
+.cabinet-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-full);
+  background: linear-gradient(135deg, var(--accent), #6366f1);
+  color: var(--text-on-accent);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+}
+
+.cabinet-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+
+.cabinet-avatar.has-img {
+  background: var(--bg-surface-subtle);
+}
+
+.cabinet-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cabinet-name {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cabinet-email {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sync-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  margin-top: 2px;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  background-color: var(--bg-surface-subtle);
+  color: var(--text-muted);
+}
+
+.sync-badge::before,
+.sync-dot {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background-color: currentColor;
+  flex-shrink: 0;
+}
+
+.sync-badge.has-dot::before {
+  display: none;
+}
+
+.sync-badge[data-sync="synced"] {
+  background-color: var(--success-soft);
+  color: var(--success-text);
+}
+
+.sync-badge[data-sync="syncing"] {
+  background-color: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.sync-badge[data-sync="syncing"]::before,
+.sync-badge[data-sync="syncing"] .sync-dot {
+  animation: tf-pulse-dot 1.2s ease-in-out infinite;
+}
+
+.sync-badge[data-sync="local"] {
+  background-color: var(--bg-surface-subtle);
+  color: var(--text-secondary);
+}
+
+.sync-badge[data-sync="error"] {
+  background-color: var(--danger-soft);
+  color: var(--danger-text);
+}
+
 /* Sidebar Footer */
 .sidebar-footer {
   margin-top: auto;
@@ -457,10 +593,10 @@
   position: relative;
   display: flex;
   align-items: center;
-  width: 185px;
-  min-width: 145px;
+  width: 175px;
+  min-width: 135px;
   max-width: 100%;
-  flex: 0 1 185px;
+  flex: 0 1 175px;
 }
 
 .header-search-icon {
@@ -637,6 +773,78 @@
   color: var(--danger-text);
 }
 
+/* Header Account Pill */
+#header-account-pill,
+.account-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  max-width: 148px;
+  padding: 0 10px 0 4px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-xs);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+}
+
+.account-pill:hover {
+  background-color: var(--bg-surface-hover);
+  border-color: var(--border-default);
+  box-shadow: var(--shadow-sm);
+}
+
+.account-pill .cabinet-avatar,
+.account-pill-avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 10px;
+}
+
+.account-pill-name {
+  max-width: 82px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background-color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.account-pill[data-sync="synced"] .account-pill-dot,
+.account-pill-dot[data-sync="synced"] {
+  background-color: var(--success);
+}
+
+.account-pill[data-sync="syncing"] .account-pill-dot,
+.account-pill-dot[data-sync="syncing"] {
+  background-color: var(--accent);
+  animation: tf-pulse-dot 1.2s ease-in-out infinite;
+}
+
+.account-pill[data-sync="local"] .account-pill-dot,
+.account-pill-dot[data-sync="local"] {
+  background-color: var(--text-muted);
+}
+
+.account-pill[data-sync="error"] .account-pill-dot,
+.account-pill-dot[data-sync="error"] {
+  background-color: var(--danger);
+}
+
 /* Mobile Menu Button */
 #btn-mobile-menu,
 .mobile-menu-btn {
@@ -711,9 +919,19 @@
 /* --------------------------------------------------------------------------
    Responsive Breakpoints (Desktop -> Tablet -> Mobile 360px+)
    -------------------------------------------------------------------------- */
-@media (max-width: 1240px) {
+@media (max-width: 1300px) {
   .timer-task-chip,
   .header-timer-task {
+    display: none;
+  }
+}
+
+@media (max-width: 1180px) {
+  .account-pill {
+    padding: 0 6px 0 4px;
+  }
+
+  .account-pill-name {
     display: none;
   }
 }
@@ -774,7 +992,7 @@
   }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   .top-header {
     flex-wrap: wrap;
     padding: var(--space-2-5) var(--space-3);
@@ -803,7 +1021,9 @@
   .header-cmd-btn .cmd-label {
     display: none;
   }
+}
 
+@media (max-width: 760px) {
   .main-content {
     padding: var(--space-4) var(--space-3) var(--space-8);
   }

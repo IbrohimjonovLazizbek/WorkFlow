@@ -14,7 +14,6 @@
   var activeModalId = null;
   var paletteActiveIndex = 0;
   var paletteItems = [];
-  var lastRenderedView = null;
   var lastRenderedTheme = null;
   var timerRefs = null;
   var initialized = false;
@@ -195,7 +194,6 @@
     var workspaceEl = $('sidebar-workspace-name');
     if (workspaceEl) workspaceEl.textContent = state.settings.userName || 'Daily Workspace';
 
-    // View panels
     var panels = global.document.querySelectorAll('.view-panel[data-view-panel]');
     for (var i = 0; i < panels.length; i += 1) {
       var panel = panels[i];
@@ -203,7 +201,6 @@
       panel.hidden = !isTarget;
     }
 
-    // Nav items
     var navItems = global.document.querySelectorAll('.nav-item[data-view]');
     for (var j = 0; j < navItems.length; j += 1) {
       var btn = navItems[j];
@@ -213,7 +210,6 @@
       else btn.removeAttribute('aria-current');
     }
 
-    // Header title & subtitle
     var titleEl = $('header-title');
     var subEl = $('header-subtitle');
     if (titleEl) {
@@ -247,7 +243,6 @@
       }
     }
 
-    // Nav badges
     var todayBadge = $('nav-badge-today');
     if (todayBadge) {
       var todayStats = store.getDayStats(utils.todayKey());
@@ -275,13 +270,11 @@
       rtnBadge.textContent = String(state.routines.filter(function (r) { return r.active; }).length);
     }
 
-    // Sync global search input without disrupting active typing
     var searchEl = $('global-search-input');
     if (searchEl && global.document.activeElement !== searchEl && searchEl.value !== state.filters.search) {
       searchEl.value = state.filters.search;
     }
 
-    // Sample data banner
     var sampleBanner = $('sample-data-banner');
     if (sampleBanner) {
       sampleBanner.hidden = !(state.isSampleData && !sampleBannerDismissed);
@@ -464,10 +457,10 @@
   }
 
   /* =========================================================================
-   * Modals: Command Palette, Settings, Shortcuts
+   * Modals: Command Palette, Settings, Shortcuts, Cabinet
    * ========================================================================= */
   function closeModals() {
-    var ids = ['command-palette-modal', 'settings-modal', 'shortcuts-modal'];
+    var ids = ['command-palette-modal', 'settings-modal', 'shortcuts-modal', 'cabinet-modal'];
     ids.forEach(function (id) {
       var el = $(id);
       if (el) el.hidden = true;
@@ -510,6 +503,7 @@
     var utils = getUtils();
     var timer = getTimer();
     var state = store.getState();
+    var auth = store.getAuthState();
     var q = (query || '').trim().toLowerCase();
 
     var commands = [
@@ -540,6 +534,28 @@
         title: 'Go to Daily Routines',
         hint: '4',
         run: function () { store.setActiveView('routines'); }
+      },
+      {
+        id: 'cabinet-open',
+        group: 'Account',
+        title: 'Open Personal Cabinet',
+        hint: '',
+        run: function () {
+          if (TaskFlow.AuthUI && typeof TaskFlow.AuthUI.openCabinetModal === 'function') {
+            TaskFlow.AuthUI.openCabinetModal('account');
+          }
+        }
+      },
+      {
+        id: 'telegram-send',
+        group: 'Account',
+        title: "Send Today's Summary to Telegram",
+        hint: '',
+        run: function () {
+          if (TaskFlow.AuthUI && typeof TaskFlow.AuthUI.sendTodaySummaryToTelegram === 'function') {
+            TaskFlow.AuthUI.sendTodaySummaryToTelegram();
+          }
+        }
       },
       {
         id: 'action-new-task',
@@ -661,7 +677,26 @@
       }
     ];
 
-    // Add matching tasks (prioritize selectedDate & recent/upcoming)
+    if (!auth.authenticated) {
+      commands.splice(5, 0, {
+        id: 'google-signin',
+        group: 'Account',
+        title: 'Sign in with Google',
+        hint: '',
+        run: function () {
+          if (global.location && global.location.protocol === 'file:') {
+            showToast('Google Sign-In requires serving TaskFlow over HTTP/HTTPS');
+            return;
+          }
+          if (auth.authStatus && auth.authStatus.googleConfigured === false) {
+            if (TaskFlow.AuthUI) TaskFlow.AuthUI.openCabinetModal('account');
+            return;
+          }
+          global.location.assign('/api/auth/google');
+        }
+      });
+    }
+
     var matchingTasks = state.tasks
       .filter(function (t) {
         if (!q) return t.date === state.selectedDate;
@@ -775,12 +810,29 @@
     }
   }
 
-  function onStoreChange(state) {
+  function onStoreChange(state, meta) {
+    var reason = meta && meta.reason ? meta.reason : 'update';
     applyTheme(state.theme);
+
+    if (reason === 'sync' || reason === 'authStatus') {
+      if (TaskFlow.AuthUI && typeof TaskFlow.AuthUI.render === 'function') {
+        TaskFlow.AuthUI.render();
+      }
+      return;
+    }
+
+    if (reason === 'authSwitch') {
+      if (TaskFlow.TasksUI && typeof TaskFlow.TasksUI.closeDrawer === 'function') {
+        TaskFlow.TasksUI.closeDrawer();
+      }
+    }
+
     updateHeaderAndNav(state);
     updateHeaderTimerWidget();
+    if (TaskFlow.AuthUI && typeof TaskFlow.AuthUI.render === 'function') {
+      TaskFlow.AuthUI.render();
+    }
     renderActiveModules(state);
-    lastRenderedView = state.activeView;
   }
 
   /* =========================================================================
@@ -792,12 +844,17 @@
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || Boolean(el.isContentEditable);
   }
 
+  function hasAnyOpenModal() {
+    if (activeModalId) return true;
+    var cab = $('cabinet-modal');
+    return Boolean(cab && !cab.hidden);
+  }
+
   function bindGlobalEvents() {
     var store = getStore();
     var utils = getUtils();
     var timer = getTimer();
 
-    // Sidebar navigation
     var navList = global.document.querySelector('.nav-list');
     if (navList) {
       navList.addEventListener('click', function (e) {
@@ -808,7 +865,6 @@
       });
     }
 
-    // Sidebar category quick-filter
     var catSidebar = $('sidebar-categories');
     if (catSidebar) {
       catSidebar.addEventListener('click', function (e) {
@@ -824,7 +880,6 @@
       });
     }
 
-    // Mobile drawer controls
     var mobileMenuBtn = $('btn-mobile-menu');
     if (mobileMenuBtn) mobileMenuBtn.addEventListener('click', openMobileSidebar);
     var sidebarCloseBtn = $('btn-sidebar-close');
@@ -832,7 +887,6 @@
     var sidebarBackdrop = $('sidebar-backdrop');
     if (sidebarBackdrop) sidebarBackdrop.addEventListener('click', closeMobileSidebar);
 
-    // Header actions
     var themeBtn = $('btn-theme-toggle');
     if (themeBtn) themeBtn.addEventListener('click', toggleTheme);
 
@@ -865,7 +919,6 @@
       });
     }
 
-    // Global Search Input
     var searchInput = $('global-search-input');
     if (searchInput) {
       searchInput.addEventListener('input', function () {
@@ -882,7 +935,6 @@
       });
     }
 
-    // Sample data banner buttons
     var clearBannerBtn = $('btn-clear-sample-banner');
     if (clearBannerBtn) {
       clearBannerBtn.addEventListener('click', function () {
@@ -900,7 +952,6 @@
       });
     }
 
-    // Modal close buttons & backdrop clicks
     global.document.addEventListener('click', function (e) {
       var closeTrigger = e.target.closest('[data-close-modal]');
       if (closeTrigger) {
@@ -912,7 +963,6 @@
       }
     });
 
-    // Command palette interactions
     var cmdInput = $('command-palette-input');
     if (cmdInput) {
       cmdInput.addEventListener('input', function () {
@@ -948,7 +998,6 @@
       });
     }
 
-    // Settings form bindings
     var settingsForm = $('settings-form');
     if (settingsForm) {
       var syncSettings = function () {
@@ -974,7 +1023,6 @@
       });
     }
 
-    // Data backup buttons in Settings
     var expJsonBtn = $('btn-export-json');
     if (expJsonBtn) {
       expJsonBtn.addEventListener('click', function () {
@@ -1036,11 +1084,12 @@
       });
     }
 
-    // Global Keyboard Shortcuts
     global.document.addEventListener('keydown', function (e) {
       var isCmdOrCtrl = e.metaKey || e.ctrlKey;
+      var shell = $('app-shell');
+      var gateOpen = Boolean(shell && shell.hidden);
 
-      if (isCmdOrCtrl && e.key.toLowerCase() === 'k') {
+      if (isCmdOrCtrl && e.key.toLowerCase() === 'k' && !gateOpen) {
         e.preventDefault();
         if (activeModalId === 'command-palette-modal') closeModals();
         else openCommandPalette();
@@ -1048,7 +1097,7 @@
       }
 
       if (e.key === 'Escape') {
-        if (activeModalId) {
+        if (hasAnyOpenModal()) {
           e.preventDefault();
           closeModals();
           return;
@@ -1068,6 +1117,8 @@
         return;
       }
 
+      if (gateOpen) return;
+
       if (isCmdOrCtrl && e.key.toLowerCase() === 'z' && !e.shiftKey && !isTextInputElement(global.document.activeElement)) {
         if (store.canUndo()) {
           e.preventDefault();
@@ -1077,7 +1128,7 @@
         return;
       }
 
-      if (activeModalId || isTextInputElement(global.document.activeElement) || e.metaKey || e.ctrlKey || e.altKey) {
+      if (hasAnyOpenModal() || isTextInputElement(global.document.activeElement) || e.metaKey || e.ctrlKey || e.altKey) {
         return;
       }
 
@@ -1127,6 +1178,10 @@
     var store = getStore();
     var timer = getTimer();
 
+    if (typeof store.bootstrap === 'function') {
+      store.bootstrap();
+    }
+
     initHeaderTimerWidget();
     bindGlobalEvents();
 
@@ -1138,6 +1193,9 @@
     }
     if (TaskFlow.AnalyticsUI && typeof TaskFlow.AnalyticsUI.init === 'function') {
       TaskFlow.AnalyticsUI.init();
+    }
+    if (TaskFlow.AuthUI && typeof TaskFlow.AuthUI.init === 'function') {
+      TaskFlow.AuthUI.init();
     }
 
     store.subscribe(onStoreChange);
@@ -1152,7 +1210,7 @@
       }
     });
 
-    onStoreChange(store.getState());
+    onStoreChange(store.getState(), { reason: 'init' });
   }
 
   TaskFlow.App = {

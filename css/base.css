@@ -184,7 +184,9 @@ kbd,
 .mono,
 .header-timer-clock,
 .timer-readout,
-.timer-display {
+.timer-display,
+.pairing-code-value,
+.code-pill {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
@@ -328,6 +330,9 @@ kbd,
   .sidebar,
   .sidebar-backdrop,
   .top-header,
+  .auth-gate,
+  .account-pill,
+  .sidebar-cabinet,
   .sample-banner,
   .date-strip,
   .rollover-banner,
