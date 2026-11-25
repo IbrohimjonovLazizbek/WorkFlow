@@ -9,12 +9,18 @@
   <script>
     (function () {
       try {
-        var raw = localStorage.getItem('taskflow_state_v1');
-        if (raw) {
-          var parsed = JSON.parse(raw);
-          if (parsed && (parsed.theme === 'dark' || parsed.theme === 'light')) {
-            document.documentElement.setAttribute('data-theme', parsed.theme);
+        var t = localStorage.getItem('taskflow_active_theme');
+        if (t !== 'dark' && t !== 'light') {
+          var raw = localStorage.getItem('taskflow_state_v1');
+          if (raw) {
+            var parsed = JSON.parse(raw);
+            if (parsed && (parsed.theme === 'dark' || parsed.theme === 'light')) {
+              t = parsed.theme;
+            }
           }
+        }
+        if (t === 'dark' || t === 'light') {
+          document.documentElement.setAttribute('data-theme', t);
         }
       } catch (e) {
         /* ignore storage read issues on early theme init */

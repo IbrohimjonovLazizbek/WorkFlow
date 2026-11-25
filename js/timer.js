@@ -320,6 +320,20 @@
     });
   }
 
+  // Flush any completed focus minutes cleanly when backgrounding or closing tab
+  if (global.addEventListener) {
+    global.addEventListener('pagehide', function () {
+      flushMinutesToTask();
+    });
+  }
+  if (global.document && global.document.addEventListener) {
+    global.document.addEventListener('visibilitychange', function () {
+      if (global.document.visibilityState === 'hidden') {
+        flushMinutesToTask();
+      }
+    });
+  }
+
   TaskFlow.Timer = {
     attachTask: attachTask,
     start: start,

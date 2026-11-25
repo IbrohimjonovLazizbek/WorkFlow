@@ -62,6 +62,9 @@ function loadTaskFlowRuntime(options = {}) {
     localStorage: storage,
     document: doc
   };
+  if (typeof options.fetch === 'function') {
+    sandbox.fetch = options.fetch;
+  }
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
 
@@ -502,4 +505,107 @@ test('Timer: mode switching, start/pause/reset, and logging minutes to attached 
   // Deleting attached task detaches silently
   Store.deleteTask(task.id);
   assert.equal(Timer.getState().attachedTaskId, null);
+});
+
+test('Cloud Sync: persistent outbox, keepalive, theme sync, reload flush, and live diff refresh', async () => {
+  const storage = createStorageMock();
+  const requests = [];
+  let failNextWrite = true;
+  let serverTasks = [];
+  let serverTheme = 'light';
+
+  const mockFetch = async (url, opts = {}) => {
+    requests.push({ url, method: opts.method || 'GET', body: opts.body ? JSON.parse(opts.body) : null, keepalive: opts.keepalive });
+    if (String(url) === '/api/tasks' && opts.method === 'POST') {
+      if (failNextWrite) {
+        failNextWrite = false;
+        return { ok: false, status: 503, headers: { get: () => 'application/json' }, text: async () => JSON.stringify({ error: 'Offline' }) };
+      }
+      serverTasks.push(JSON.parse(opts.body));
+      return { ok: true, status: 201, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }) };
+    }
+    if (String(url) === '/api/settings' && opts.method === 'PUT') {
+      const body = JSON.parse(opts.body);
+      serverTheme = body.theme || serverTheme;
+      return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }) };
+    }
+    if (String(url) === '/api/workspace') {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => ({
+          user: { id: 'usr_sync_1', email: 'u@example.com', name: 'Sync User', timezone: 'Asia/Tashkent' },
+          settings: { dailyGoalTasks: 5, dailyGoalMinutes: 120, soundEnabled: true, userName: 'Daily Workspace', showCompleted: true, theme: serverTheme },
+          tasks: serverTasks.slice(),
+          routines: [],
+          reflections: {}
+        })
+      };
+    }
+    return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }) };
+  };
+
+  // Runtime 1: sign in, fail write offline -> verify persistent outbox saved & keepalive used
+  const rt1 = loadTaskFlowRuntime({ files: ['js/state.js'], storage, fetch: mockFetch });
+  const userObj = { id: 'usr_sync_1', email: 'u@example.com', name: 'Sync User', timezone: 'Asia/Tashkent' };
+  rt1.TaskFlow.Store.setCloudWorkspace(userObj, {
+    user: userObj,
+    settings: { dailyGoalTasks: 5, dailyGoalMinutes: 120, soundEnabled: true, userName: 'Daily Workspace', showCompleted: true, theme: 'light' },
+    tasks: [],
+    routines: [],
+    reflections: {}
+  });
+
+  const t1 = rt1.TaskFlow.Store.addTask({ title: 'Offline queued task' });
+  await new Promise((r) => setTimeout(r, 25));
+  assert.equal(rt1.TaskFlow.Store.getPendingOutboxCount(), 1);
+  assert.equal(rt1.TaskFlow.Store.getAuthState().syncState, 'error');
+  assert.equal(requests[0].keepalive, true);
+
+  // Runtime 2 (simulating browser reload before sync recovered): flushes persisted outbox BEFORE reading server
+  const rt2 = loadTaskFlowRuntime({ files: ['js/state.js'], storage, fetch: mockFetch });
+  const flushRes = await rt2.TaskFlow.Store.flushCloudOutboxForUser(userObj);
+  assert.equal(flushRes.ok, true);
+  assert.equal(flushRes.flushed, 1);
+  assert.equal(rt2.TaskFlow.Store.getPendingOutboxCount(), 0);
+  assert.equal(serverTasks.length, 1);
+  assert.equal(serverTasks[0].id, t1.id);
+
+  // Theme change syncs immediately to D1 settings
+  rt2.TaskFlow.Store.setTheme('dark');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(serverTheme, 'dark');
+  assert.equal(storage.getItem('taskflow_active_theme'), 'dark');
+
+  // Unchanged background refresh does NOT fire workspaceSync listeners
+  const syncEvents = [];
+  rt2.TaskFlow.Store.subscribe((_s, meta) => { syncEvents.push(meta.reason); });
+  const rSame = await rt2.TaskFlow.Store.refreshWorkspaceFromCloud({ silent: true });
+  assert.equal(rSame.changed, false);
+  assert.equal(syncEvents.includes('workspaceSync'), false);
+
+  // Remote change (e.g. Telegram /add) updates live Store state seamlessly
+  serverTasks.push({
+    id: 'task_from_tg',
+    title: 'Added via Telegram',
+    notes: '',
+    date: rt2.TaskFlow.Utils.todayKey(),
+    timeBlock: 'anytime',
+    scheduledTime: '',
+    estimatedMinutes: 30,
+    actualMinutes: 0,
+    priority: 'medium',
+    category: 'work',
+    status: 'todo',
+    subtasks: [],
+    routineId: null,
+    order: 1,
+    createdAt: new Date().toISOString(),
+    completedAt: null
+  });
+  const rDiff = await rt2.TaskFlow.Store.refreshWorkspaceFromCloud({ silent: true });
+  assert.equal(rDiff.changed, true);
+  assert.equal(syncEvents.includes('workspaceSync'), true);
+  assert.equal(rt2.TaskFlow.Store.getState().tasks.some((t) => t.id === 'task_from_tg'), true);
 });

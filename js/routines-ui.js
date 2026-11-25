@@ -454,17 +454,38 @@
         }, 300);
       });
 
-      todayView.addEventListener('focusout', function (e) {
-        var field = e.target && e.target.getAttribute('data-checkin-field');
-        if (!field) {
-          return;
-        }
+      var flushReflectionField = function (targetEl) {
+        var field = targetEl && targetEl.getAttribute('data-checkin-field');
+        if (!field) return;
         clearTimeout(uiState.debounceTimer);
+        uiState.debounceTimer = null;
         var store = getStore();
         var dateStr = store.getState().selectedDate || getUtils().todayKey();
+        var existing = (store.getState().reflections && store.getState().reflections[dateStr]) || {};
+        if ((existing[field] || '') === targetEl.value) return;
         var patch = {};
-        patch[field] = e.target.value;
+        patch[field] = targetEl.value;
         store.saveReflection(dateStr, patch);
+      };
+
+      todayView.addEventListener('focusout', function (e) {
+        flushReflectionField(e.target);
+      });
+
+      window.addEventListener('pagehide', function () {
+        var active = document.activeElement;
+        if (active && todayView.contains(active)) {
+          flushReflectionField(active);
+        }
+      });
+
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'hidden') {
+          var active = document.activeElement;
+          if (active && todayView.contains(active)) {
+            flushReflectionField(active);
+          }
+        }
       });
     }
 

@@ -29,6 +29,11 @@
     'America/Los_Angeles'
   ];
 
+  var LIVE_SYNC_INTERVAL_MS = 8000;
+  var liveSyncTimerId = null;
+  var lastRefreshAtMs = 0;
+  var deferredRefresh = false;
+
   var uiState = {
     initialized: false,
     activeTab: 'account', // 'account' | 'telegram'
@@ -523,14 +528,68 @@
     uiState.modalOpen = false;
   }
 
+  function isEditingActiveInput() {
+    var el = global.document ? global.document.activeElement : null;
+    if (!el || !el.tagName) return false;
+    var tag = el.tagName.toUpperCase();
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || Boolean(el.isContentEditable);
+  }
+
+  function triggerBackgroundRefresh(force) {
+    var store = getStore();
+    if (!store || typeof store.refreshWorkspaceFromCloud !== 'function') return Promise.resolve();
+    var auth = store.getAuthState();
+    if (!auth.authenticated || !auth.user) return Promise.resolve();
+    if (global.document && global.document.visibilityState === 'hidden') return Promise.resolve();
+    if (isEditingActiveInput() || uiState.busyAction) {
+      deferredRefresh = true;
+      return Promise.resolve();
+    }
+    var now = Date.now();
+    if (!force && now - lastRefreshAtMs < 3500) return Promise.resolve();
+    lastRefreshAtMs = now;
+    deferredRefresh = false;
+    return store.refreshWorkspaceFromCloud({ silent: true }).then(function () {
+      if (uiState.modalOpen) renderCabinetModal();
+    });
+  }
+
+  function stopLiveSync() {
+    if (liveSyncTimerId !== null && typeof global.clearInterval === 'function') {
+      global.clearInterval(liveSyncTimerId);
+      liveSyncTimerId = null;
+    }
+    deferredRefresh = false;
+  }
+
+  function startLiveSync() {
+    stopLiveSync();
+    if (typeof global.setInterval === 'function') {
+      liveSyncTimerId = global.setInterval(function () {
+        triggerBackgroundRefresh(false);
+      }, LIVE_SYNC_INTERVAL_MS);
+    }
+  }
+
   function syncFromCloud() {
     if (uiState.busyAction) return Promise.resolve();
+    var store = getStore();
+    var auth = store.getAuthState();
+    if (!auth.authenticated || !auth.user) return Promise.resolve();
+
     uiState.busyAction = 'sync';
     renderCabinetModal();
-    return fetchJson('/api/workspace').then(function (ws) {
+
+    var flushPromise = typeof store.flushCloudOutboxForUser === 'function'
+      ? store.flushCloudOutboxForUser(auth.user)
+      : Promise.resolve();
+
+    return flushPromise.then(function () {
+      return fetchJson('/api/workspace');
+    }).then(function (ws) {
       uiState.busyAction = null;
       if (ws && ws.user) {
-        getStore().setCloudWorkspace(ws.user, ws);
+        store.setCloudWorkspace(ws.user, ws, { preserveUi: true });
         toast('Synced latest workspace from cloud', { type: 'success' });
       }
       render();
@@ -543,9 +602,19 @@
 
   function signOut() {
     if (uiState.busyAction) return;
+    stopLiveSync();
+    var store = getStore();
+    var auth = store.getAuthState();
     uiState.busyAction = 'logout';
     renderCabinetModal();
-    fetchJson('/api/auth/logout', { method: 'POST' }).catch(function () {
+
+    var flushPromise = auth && auth.authenticated && auth.user && typeof store.flushCloudOutboxForUser === 'function'
+      ? store.flushCloudOutboxForUser(auth.user).catch(function () { return null; })
+      : Promise.resolve();
+
+    flushPromise.then(function () {
+      return fetchJson('/api/auth/logout', { method: 'POST' });
+    }).catch(function () {
       return null;
     }).then(function () {
       uiState.busyAction = null;
@@ -555,7 +624,7 @@
       if (TaskFlow.TasksUI && typeof TaskFlow.TasksUI.closeDrawer === 'function') {
         TaskFlow.TasksUI.closeDrawer();
       }
-      getStore().setGuestMode();
+      store.setGuestMode();
       showAuthGate();
       toast('Signed out of cloud cabinet');
     });
@@ -686,6 +755,38 @@
       });
     }
 
+    if (global.document && global.document.addEventListener) {
+      global.document.addEventListener('visibilitychange', function () {
+        if (global.document.visibilityState === 'visible') {
+          triggerBackgroundRefresh(false);
+        }
+      });
+      global.document.addEventListener('focusout', function () {
+        if (deferredRefresh) {
+          global.setTimeout(function () {
+            if (deferredRefresh && !isEditingActiveInput()) {
+              triggerBackgroundRefresh(false);
+            }
+          }, 80);
+        }
+      });
+    }
+
+    if (global.addEventListener) {
+      global.addEventListener('focus', function () {
+        triggerBackgroundRefresh(false);
+      });
+      global.addEventListener('online', function () {
+        var store = getStore();
+        var auth = store ? store.getAuthState() : null;
+        if (auth && auth.authenticated && auth.user && typeof store.flushCloudOutboxForUser === 'function') {
+          store.flushCloudOutboxForUser(auth.user).then(function () {
+            triggerBackgroundRefresh(true);
+          });
+        }
+      });
+    }
+
     var sideCabinet = $('sidebar-user-cabinet');
     if (sideCabinet) {
       sideCabinet.addEventListener('click', function () {
@@ -725,6 +826,7 @@
           soundEnabled: s.soundEnabled,
           userName: s.userName,
           showCompleted: s.showCompleted,
+          theme: store.getState().theme,
           timezone: tzEl ? tzEl.value : 'Asia/Tashkent',
           morningReminderHour: mEl ? Number(mEl.value) : 8,
           eveningReminderHour: eEl ? Number(eEl.value) : 21,
@@ -840,17 +942,32 @@
 
       return checkMiniApp.then(function (resolvedMe) {
         if (resolvedMe && resolvedMe.authenticated && resolvedMe.user) {
-          return fetchJson('/api/workspace').then(function (ws) {
-            store.setCloudWorkspace(ws.user || resolvedMe.user, ws);
-            showAppShell();
-            render();
-          }).catch(function () {
-            store.setCloudWorkspace(resolvedMe.user, {});
-            showAppShell();
-            render();
+          var preFlush = typeof store.flushCloudOutboxForUser === 'function'
+            ? store.flushCloudOutboxForUser(resolvedMe.user).catch(function () { return null; })
+            : Promise.resolve();
+
+          return preFlush.then(function () {
+            if (typeof store.getPendingOutboxCount === 'function' && store.getPendingOutboxCount() > 0) {
+              startLiveSync();
+              showAppShell();
+              render();
+              return null;
+            }
+            return fetchJson('/api/workspace').then(function (ws) {
+              store.setCloudWorkspace(ws.user || resolvedMe.user, ws);
+              startLiveSync();
+              showAppShell();
+              render();
+            }).catch(function () {
+              store.setCloudWorkspace(resolvedMe.user, {});
+              startLiveSync();
+              showAppShell();
+              render();
+            });
           });
         }
 
+        stopLiveSync();
         if (!uiState.authError && !uiState.telegramHint && readGuestFlag()) {
           store.setGuestMode();
           showAppShell();

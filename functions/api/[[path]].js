@@ -466,7 +466,8 @@ function formatSettings(row) {
       dailyGoalMinutes: 120,
       soundEnabled: true,
       userName: 'Daily Workspace',
-      showCompleted: true
+      showCompleted: true,
+      theme: 'light'
     };
   }
   return {
@@ -474,8 +475,53 @@ function formatSettings(row) {
     dailyGoalMinutes: clampInt(row.daily_goal_minutes, 15, 720, 120),
     soundEnabled: Boolean(row.sound_enabled),
     userName: typeof row.user_name === 'string' && row.user_name.trim() ? row.user_name : 'Daily Workspace',
-    showCompleted: Boolean(row.show_completed)
+    showCompleted: Boolean(row.show_completed),
+    theme: row.theme === 'dark' ? 'dark' : 'light'
   };
+}
+
+function mergeNormalizedSettings(existingRow, patch) {
+  const current = formatSettings(existingRow);
+  const s = patch && typeof patch === 'object' ? patch : {};
+  return {
+    dailyGoalTasks: s.dailyGoalTasks !== undefined
+      ? clampInt(s.dailyGoalTasks, 1, 50, current.dailyGoalTasks)
+      : current.dailyGoalTasks,
+    dailyGoalMinutes: s.dailyGoalMinutes !== undefined
+      ? clampInt(s.dailyGoalMinutes, 15, 720, current.dailyGoalMinutes)
+      : current.dailyGoalMinutes,
+    soundEnabled: s.soundEnabled !== undefined ? Boolean(s.soundEnabled) : current.soundEnabled,
+    userName: typeof s.userName === 'string' && s.userName.trim()
+      ? s.userName.trim().slice(0, 60)
+      : current.userName,
+    showCompleted: s.showCompleted !== undefined ? Boolean(s.showCompleted) : current.showCompleted,
+    theme: s.theme === 'dark' || s.theme === 'light' ? s.theme : current.theme
+  };
+}
+
+function buildSettingsUpsertStmt(db, userId, settings, updatedAtIso) {
+  return db.prepare(
+    `INSERT INTO user_settings (
+      user_id, daily_goal_tasks, daily_goal_minutes, sound_enabled, user_name, show_completed, theme, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+      daily_goal_tasks = excluded.daily_goal_tasks,
+      daily_goal_minutes = excluded.daily_goal_minutes,
+      sound_enabled = excluded.sound_enabled,
+      user_name = excluded.user_name,
+      show_completed = excluded.show_completed,
+      theme = excluded.theme,
+      updated_at = excluded.updated_at`
+  ).bind(
+    userId,
+    settings.dailyGoalTasks,
+    settings.dailyGoalMinutes,
+    settings.soundEnabled ? 1 : 0,
+    settings.userName,
+    settings.showCompleted ? 1 : 0,
+    settings.theme === 'dark' ? 'dark' : 'light',
+    updatedAtIso
+  );
 }
 
 function formatTask(row) {
@@ -1017,8 +1063,8 @@ async function handleGoogleAuthCallback(request, env) {
       ).bind(email, name, avatarUrl, nowIso, userId),
       env.DB.prepare(
         `INSERT OR IGNORE INTO user_settings (
-          user_id, daily_goal_tasks, daily_goal_minutes, sound_enabled, user_name, show_completed, updated_at
-        ) VALUES (?, 5, 120, 1, ?, 1, ?)`
+          user_id, daily_goal_tasks, daily_goal_minutes, sound_enabled, user_name, show_completed, theme, updated_at
+        ) VALUES (?, 5, 120, 1, ?, 1, 'light', ?)`
       ).bind(userId, name.slice(0, 60) || 'Daily Workspace', nowIso)
     ]);
   } else {
@@ -1031,8 +1077,8 @@ async function handleGoogleAuthCallback(request, env) {
       ).bind(userId, googleSub, email, name, avatarUrl, nowIso, nowIso),
       env.DB.prepare(
         `INSERT INTO user_settings (
-          user_id, daily_goal_tasks, daily_goal_minutes, sound_enabled, user_name, show_completed, updated_at
-        ) VALUES (?, 5, 120, 1, ?, 1, ?)`
+          user_id, daily_goal_tasks, daily_goal_minutes, sound_enabled, user_name, show_completed, theme, updated_at
+        ) VALUES (?, 5, 120, 1, ?, 1, 'light', ?)`
       ).bind(userId, name.slice(0, 60) || 'Daily Workspace', nowIso)
     ]);
   }
@@ -1203,44 +1249,8 @@ async function handleImportWorkspace(request, session, env) {
     const existingSettingsRow = await env.DB.prepare(
       'SELECT * FROM user_settings WHERE user_id = ?'
     ).bind(session.userId).first();
-    const currentSettings = formatSettings(existingSettingsRow);
-    const s = body.settings;
-    const nextSettings = {
-      dailyGoalTasks: s.dailyGoalTasks !== undefined
-        ? clampInt(s.dailyGoalTasks, 1, 50, currentSettings.dailyGoalTasks)
-        : currentSettings.dailyGoalTasks,
-      dailyGoalMinutes: s.dailyGoalMinutes !== undefined
-        ? clampInt(s.dailyGoalMinutes, 15, 720, currentSettings.dailyGoalMinutes)
-        : currentSettings.dailyGoalMinutes,
-      soundEnabled: s.soundEnabled !== undefined ? Boolean(s.soundEnabled) : currentSettings.soundEnabled,
-      userName: typeof s.userName === 'string' && s.userName.trim()
-        ? s.userName.trim().slice(0, 60)
-        : currentSettings.userName,
-      showCompleted: s.showCompleted !== undefined ? Boolean(s.showCompleted) : currentSettings.showCompleted
-    };
-
-    stmts.push(
-      env.DB.prepare(
-        `INSERT INTO user_settings (
-          user_id, daily_goal_tasks, daily_goal_minutes, sound_enabled, user_name, show_completed, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-          daily_goal_tasks = excluded.daily_goal_tasks,
-          daily_goal_minutes = excluded.daily_goal_minutes,
-          sound_enabled = excluded.sound_enabled,
-          user_name = excluded.user_name,
-          show_completed = excluded.show_completed,
-          updated_at = excluded.updated_at`
-      ).bind(
-        session.userId,
-        nextSettings.dailyGoalTasks,
-        nextSettings.dailyGoalMinutes,
-        nextSettings.soundEnabled ? 1 : 0,
-        nextSettings.userName,
-        nextSettings.showCompleted ? 1 : 0,
-        nowIso
-      )
-    );
+    const nextSettings = mergeNormalizedSettings(existingSettingsRow, body.settings);
+    stmts.push(buildSettingsUpsertStmt(env.DB, session.userId, nextSettings, nowIso));
   }
 
   if (stmts.length > 0) {
@@ -1279,23 +1289,9 @@ async function handlePutSettings(request, session, env) {
     return errorResponse(404, 'User not found', 'NOT_FOUND');
   }
 
-  const curSettings = formatSettings(existingSettingsRow);
+  const nextSettings = mergeNormalizedSettings(existingSettingsRow, body);
   const curUser = formatUser(userRow);
   const nowIso = new Date().toISOString();
-
-  const nextSettings = {
-    dailyGoalTasks: body.dailyGoalTasks !== undefined
-      ? clampInt(body.dailyGoalTasks, 1, 50, curSettings.dailyGoalTasks)
-      : curSettings.dailyGoalTasks,
-    dailyGoalMinutes: body.dailyGoalMinutes !== undefined
-      ? clampInt(body.dailyGoalMinutes, 15, 720, curSettings.dailyGoalMinutes)
-      : curSettings.dailyGoalMinutes,
-    soundEnabled: body.soundEnabled !== undefined ? Boolean(body.soundEnabled) : curSettings.soundEnabled,
-    userName: typeof body.userName === 'string' && body.userName.trim()
-      ? body.userName.trim().slice(0, 60)
-      : curSettings.userName,
-    showCompleted: body.showCompleted !== undefined ? Boolean(body.showCompleted) : curSettings.showCompleted
-  };
 
   const nextTimezone = body.timezone !== undefined ? body.timezone.trim() : curUser.timezone;
   const nextTgEnabled = body.telegramNotificationsEnabled !== undefined
@@ -1309,26 +1305,7 @@ async function handlePutSettings(request, session, env) {
     : curUser.eveningReminderHour;
 
   await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO user_settings (
-        user_id, daily_goal_tasks, daily_goal_minutes, sound_enabled, user_name, show_completed, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(user_id) DO UPDATE SET
-        daily_goal_tasks = excluded.daily_goal_tasks,
-        daily_goal_minutes = excluded.daily_goal_minutes,
-        sound_enabled = excluded.sound_enabled,
-        user_name = excluded.user_name,
-        show_completed = excluded.show_completed,
-        updated_at = excluded.updated_at`
-    ).bind(
-      session.userId,
-      nextSettings.dailyGoalTasks,
-      nextSettings.dailyGoalMinutes,
-      nextSettings.soundEnabled ? 1 : 0,
-      nextSettings.userName,
-      nextSettings.showCompleted ? 1 : 0,
-      nowIso
-    ),
+    buildSettingsUpsertStmt(env.DB, session.userId, nextSettings, nowIso),
     env.DB.prepare(
       `UPDATE users
        SET timezone = ?,

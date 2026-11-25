@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
   sound_enabled INTEGER DEFAULT 1,
   user_name TEXT DEFAULT 'Daily Workspace',
   show_completed INTEGER DEFAULT 1,
+  theme TEXT DEFAULT 'light',
   updated_at TEXT NOT NULL
 );
 

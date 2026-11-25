@@ -5,6 +5,8 @@
 
   var GUEST_STORAGE_KEY = 'taskflow_state_v1';
   var CLOUD_CACHE_PREFIX = 'taskflow_cloud_cache_v1_';
+  var OUTBOX_PREFIX = 'taskflow_outbox_v1_';
+  var ACTIVE_THEME_KEY = 'taskflow_active_theme';
   var VALID_VIEWS = ['today', 'upcoming', 'analytics', 'routines'];
   var VALID_THEMES = ['light', 'dark'];
   var VALID_TIME_BLOCKS = ['morning', 'afternoon', 'evening', 'anytime'];
@@ -829,6 +831,20 @@
 
   var pendingSyncOps = 0;
   var syncChain = Promise.resolve();
+  var memoryOutbox = {};
+  var activePumpPromise = null;
+  var activePumpUserId = null;
+  var retryTimerId = null;
+  var retryAttempt = 0;
+  var RETRY_BACKOFF_MS = [2000, 5000, 15000, 30000];
+  var activeRefreshPromise = null;
+
+  function clearOutboxRetry() {
+    if (retryTimerId !== null && typeof global.clearTimeout === 'function') {
+      global.clearTimeout(retryTimerId);
+      retryTimerId = null;
+    }
+  }
 
   function cloneData(val) {
     return JSON.parse(JSON.stringify(val));
@@ -962,18 +978,180 @@
     }
   }
 
-  function apiRequest(path, method, body) {
+  function saveThemeKey(theme) {
+    try {
+      if (global.localStorage && (theme === 'dark' || theme === 'light')) {
+        global.localStorage.setItem(ACTIVE_THEME_KEY, theme);
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  function persistSyncEnvelope(userObj, wsData) {
+    var tasks = (Array.isArray(wsData.tasks) ? wsData.tasks : []).map(function (t) {
+      return {
+        id: t.id,
+        title: t.title,
+        notes: t.notes || '',
+        date: t.date,
+        timeBlock: t.timeBlock || 'anytime',
+        scheduledTime: t.scheduledTime || '',
+        estimatedMinutes: Number(t.estimatedMinutes) || 0,
+        actualMinutes: Number(t.actualMinutes) || 0,
+        priority: t.priority || 'medium',
+        category: t.category || 'work',
+        status: t.status || 'todo',
+        subtasks: Array.isArray(t.subtasks) ? t.subtasks : [],
+        routineId: t.routineId || null,
+        order: Number(t.order) || 0,
+        completedAt: t.completedAt || null
+      };
+    }).sort(function (a, b) {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      if (a.order !== b.order) return a.order - b.order;
+      return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
+    });
+
+    var routines = (Array.isArray(wsData.routines) ? wsData.routines : []).map(function (r) {
+      return {
+        id: r.id,
+        title: r.title,
+        category: r.category,
+        priority: r.priority,
+        timeBlock: r.timeBlock,
+        estimatedMinutes: Number(r.estimatedMinutes) || 0,
+        schedule: r.schedule,
+        active: Boolean(r.active),
+        subtasks: Array.isArray(r.subtasks) ? r.subtasks : []
+      };
+    }).sort(function (a, b) {
+      return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
+    });
+
+    var rawRefs = wsData.reflections && typeof wsData.reflections === 'object' ? wsData.reflections : {};
+    var reflections = Object.keys(rawRefs).sort().map(function (k) {
+      var entry = rawRefs[k] || {};
+      return {
+        date: k,
+        mood: entry.mood === null || entry.mood === undefined ? null : Number(entry.mood),
+        intention: entry.intention || '',
+        reflection: entry.reflection || ''
+      };
+    });
+
+    var resolvedTheme = (wsData.settings && (wsData.settings.theme === 'dark' || wsData.settings.theme === 'light'))
+      ? wsData.settings.theme
+      : (wsData.theme === 'dark' ? 'dark' : 'light');
+
+    return JSON.stringify({
+      user: userObj ? {
+        timezone: userObj.timezone || 'Asia/Tashkent',
+        telegramChatId: userObj.telegramChatId || null,
+        telegramUsername: userObj.telegramUsername || null,
+        telegramNotificationsEnabled: Boolean(userObj.telegramNotificationsEnabled),
+        morningReminderHour: Number(userObj.morningReminderHour),
+        eveningReminderHour: Number(userObj.eveningReminderHour)
+      } : null,
+      theme: resolvedTheme,
+      settings: normalizeSettings(wsData.settings),
+      tasks: tasks,
+      routines: routines,
+      reflections: reflections
+    });
+  }
+
+  function loadOutbox(userId) {
+    if (!userId) return [];
+    var parsed = readStorageKey(OUTBOX_PREFIX + userId);
+    if (Array.isArray(parsed)) return parsed;
+    return Array.isArray(memoryOutbox[userId]) ? memoryOutbox[userId].slice() : [];
+  }
+
+  function saveOutbox(userId, list) {
+    if (!userId) return;
+    var clean = Array.isArray(list) ? list : [];
+    memoryOutbox[userId] = clean.slice();
+    if (clean.length === 0) {
+      try {
+        if (global.localStorage) global.localStorage.removeItem(OUTBOX_PREFIX + userId);
+      } catch (e) {
+        /* ignore */
+      }
+      return;
+    }
+    saveToStorage(OUTBOX_PREFIX + userId, clean);
+  }
+
+  function hasPendingOutbox(userId) {
+    return loadOutbox(userId).length > 0;
+  }
+
+  function getPendingOutboxCount() {
+    return authState.user ? loadOutbox(authState.user.id).length : 0;
+  }
+
+  function scheduleOutboxRetry(userId) {
+    clearOutboxRetry();
+    if (!isCloudActive() || !authState.user || authState.user.id !== userId) return;
+    if (!hasPendingOutbox(userId)) return;
+    var delay = RETRY_BACKOFF_MS[Math.min(retryAttempt, RETRY_BACKOFF_MS.length - 1)];
+    retryAttempt += 1;
+    retryTimerId = global.setTimeout(function () {
+      retryTimerId = null;
+      pumpOutbox(userId);
+    }, delay);
+  }
+
+  function applyWorkspaceReconcile(ws) {
+    if (!ws || !isCloudActive() || !authState.user) return;
+    var resolvedTheme = (ws.settings && (ws.settings.theme === 'dark' || ws.settings.theme === 'light'))
+      ? ws.settings.theme
+      : state.theme;
+    var reconciled = sanitizeFullState({
+      version: 1,
+      selectedDate: state.selectedDate,
+      activeView: state.activeView,
+      theme: resolvedTheme,
+      settings: ws.settings || state.settings,
+      tasks: Array.isArray(ws.tasks) ? ws.tasks : state.tasks,
+      routines: Array.isArray(ws.routines) ? ws.routines : state.routines,
+      reflections: ws.reflections || state.reflections,
+      filters: state.filters,
+      isSampleData: false
+    });
+    if (ws.user) {
+      var nu = normalizeUser(ws.user);
+      if (nu) authState.user = nu;
+    }
+    state.theme = reconciled.theme;
+    state.tasks = reconciled.tasks;
+    state.routines = reconciled.routines;
+    state.reflections = reconciled.reflections;
+    state.settings = reconciled.settings;
+    state.isSampleData = false;
+    saveThemeKey(state.theme);
+    commit('workspaceSync');
+  }
+
+  function apiRequest(path, method, body, reqOpts) {
     if (typeof global.fetch !== 'function') {
       return Promise.resolve({ ok: true, skipped: true });
     }
+    var httpMethod = (method || 'GET').toUpperCase();
     var opts = {
-      method: method || 'GET',
+      method: httpMethod,
       credentials: 'same-origin',
       headers: {}
     };
+    var bodyStr = '';
     if (body !== undefined) {
+      bodyStr = JSON.stringify(body);
       opts.headers['Content-Type'] = 'application/json';
-      opts.body = JSON.stringify(body);
+      opts.body = bodyStr;
+    }
+    if (reqOpts && reqOpts.allowKeepalive && httpMethod !== 'GET' && bodyStr.length < 60000) {
+      opts.keepalive = true;
     }
     return global.fetch(path, opts).then(function (res) {
       if (!res.ok) {
@@ -998,36 +1176,204 @@
     });
   }
 
-  function queueCloudOp(fn) {
-    if (!isCloudActive() || typeof global.fetch !== 'function') return Promise.resolve();
-    var opUserId = authState.user.id;
-    pendingSyncOps += 1;
-    if (authState.syncState !== 'syncing') {
-      authState.syncState = 'syncing';
-      notifyListeners('sync');
+  function buildSettingsPayload(themeOverride) {
+    var u = authState.user || {};
+    var nextTheme = (themeOverride === 'dark' || themeOverride === 'light') ? themeOverride : state.theme;
+    return Object.assign({}, state.settings, {
+      theme: nextTheme,
+      timezone: u.timezone || 'Asia/Tashkent',
+      telegramNotificationsEnabled: u.telegramNotificationsEnabled !== undefined ? Boolean(u.telegramNotificationsEnabled) : true,
+      morningReminderHour: u.morningReminderHour !== undefined ? u.morningReminderHour : 8,
+      eveningReminderHour: u.eveningReminderHour !== undefined ? u.eveningReminderHour : 21
+    });
+  }
+
+  function pumpOutbox(userId) {
+    if (!userId || !isCloudActive() || !authState.user || authState.user.id !== userId) {
+      return Promise.resolve({ ok: false, skipped: true });
+    }
+    if (typeof global.fetch !== 'function') {
+      return Promise.resolve({ ok: true, skipped: true });
+    }
+    if (activePumpPromise && activePumpUserId === userId) {
+      return activePumpPromise;
     }
 
-    syncChain = syncChain.then(function () {
-      if (!isCloudActive() || !authState.user || authState.user.id !== opUserId) return null;
-      return fn();
-    }).then(function () {
-      pendingSyncOps = Math.max(0, pendingSyncOps - 1);
-      if (pendingSyncOps === 0 && isCloudActive() && authState.user && authState.user.id === opUserId) {
+    clearOutboxRetry();
+    activePumpUserId = userId;
+    var step = function () {
+      if (!isCloudActive() || !authState.user || authState.user.id !== userId) {
+        return Promise.resolve({ ok: false, switched: true });
+      }
+      var list = loadOutbox(userId);
+      if (list.length === 0) {
+        pendingSyncOps = 0;
+        retryAttempt = 0;
         authState.syncState = 'synced';
         authState.lastSyncError = null;
         authState.lastSyncedAt = new Date().toISOString();
         notifyListeners('sync');
+        return Promise.resolve({ ok: true });
       }
-    }).catch(function (err) {
-      pendingSyncOps = Math.max(0, pendingSyncOps - 1);
-      if (isCloudActive() && authState.user && authState.user.id === opUserId) {
-        authState.syncState = 'error';
-        authState.lastSyncError = err && err.message ? err.message : 'Cloud sync error';
+
+      var head = list[0];
+      pendingSyncOps = list.length;
+      if (authState.syncState !== 'syncing') {
+        authState.syncState = 'syncing';
         notifyListeners('sync');
       }
-    });
 
-    return syncChain;
+      return apiRequest(head.path, head.method, head.body, { allowKeepalive: true }).then(function (res) {
+        var latest = loadOutbox(userId);
+        if (latest.length > 0 && latest[0].id === head.id) {
+          latest.shift();
+          saveOutbox(userId, latest);
+        }
+        pendingSyncOps = latest.length;
+        retryAttempt = 0;
+
+        if (
+          head.kind === 'replaceWorkspace' &&
+          res &&
+          res.workspace &&
+          latest.length === 0 &&
+          isCloudActive() &&
+          authState.user &&
+          authState.user.id === userId
+        ) {
+          applyWorkspaceReconcile(res.workspace);
+        }
+
+        return step();
+      }).catch(function (err) {
+        var latest = loadOutbox(userId);
+        if (err && err.status === 404 && latest.length > 0 && latest[0].id === head.id) {
+          if (head.method === 'DELETE') {
+            latest.shift();
+            saveOutbox(userId, latest);
+            return step();
+          }
+          if (head.method === 'PATCH' && head.path.indexOf('/api/tasks/') === 0) {
+            var taskId = '';
+            try { taskId = decodeURIComponent(head.path.slice('/api/tasks/'.length)); } catch (e) { taskId = ''; }
+            var idx = taskId ? findTaskIndex(taskId) : -1;
+            if (idx !== -1) {
+              latest[0] = Object.assign({}, head, { path: '/api/tasks', method: 'POST', body: state.tasks[idx] });
+              saveOutbox(userId, latest);
+              return step();
+            }
+            latest.shift();
+            saveOutbox(userId, latest);
+            return step();
+          }
+        }
+
+        pendingSyncOps = latest.length;
+        if (isCloudActive() && authState.user && authState.user.id === userId) {
+          authState.syncState = 'error';
+          authState.lastSyncError = (err && err.status === 401)
+            ? 'Session expired — sign in again to sync'
+            : (err && err.message ? err.message : 'Cloud sync error');
+          notifyListeners('sync');
+          if (!err || err.status !== 401) {
+            scheduleOutboxRetry(userId);
+          }
+        }
+        return { ok: false, error: authState.lastSyncError };
+      });
+    };
+
+    var promise = step().finally(function () {
+      if (activePumpPromise === promise) {
+        activePumpPromise = null;
+        activePumpUserId = null;
+      }
+    });
+    activePumpPromise = promise;
+    return promise;
+  }
+
+  function queueCloudOps(ops) {
+    if (!isCloudActive() || typeof global.fetch !== 'function') return Promise.resolve();
+    var items = Array.isArray(ops) ? ops : [ops];
+    if (items.length === 0) return Promise.resolve();
+
+    var userId = authState.user.id;
+    var list = loadOutbox(userId);
+    var headLocked = Boolean(activePumpPromise && activePumpUserId === userId && list.length > 0);
+    var lockedPrefix = headLocked ? [list[0]] : [];
+    var tail = headLocked ? list.slice(1) : list.slice();
+
+    for (var i = 0; i < items.length; i += 1) {
+      var raw = items[i];
+      if (!raw || !raw.path) continue;
+      var op = {
+        id: uid('op'),
+        path: raw.path,
+        method: (raw.method || 'POST').toUpperCase(),
+        body: raw.body,
+        kind: raw.kind || null
+      };
+      if (op.kind === 'replaceWorkspace') {
+        tail = [op];
+        continue;
+      }
+      var coalesced = false;
+      if (op.method === 'PATCH' || op.method === 'PUT') {
+        for (var j = tail.length - 1; j >= 0; j -= 1) {
+          if (tail[j].method === op.method && tail[j].path === op.path) {
+            tail[j] = op;
+            coalesced = true;
+            break;
+          }
+        }
+      }
+      if (!coalesced) {
+        tail.push(op);
+      }
+    }
+
+    var nextList = lockedPrefix.concat(tail);
+    saveOutbox(userId, nextList);
+    pendingSyncOps = nextList.length;
+    if (authState.syncState !== 'syncing') {
+      authState.syncState = 'syncing';
+      notifyListeners('sync');
+    }
+    return pumpOutbox(userId);
+  }
+
+  function queueCloudOp(arg) {
+    if (typeof arg === 'function') {
+      if (!isCloudActive() || typeof global.fetch !== 'function') return Promise.resolve();
+      var userId = authState.user.id;
+      pendingSyncOps += 1;
+      if (authState.syncState !== 'syncing') {
+        authState.syncState = 'syncing';
+        notifyListeners('sync');
+      }
+      syncChain = syncChain.then(function () {
+        if (!isCloudActive() || !authState.user || authState.user.id !== userId) return null;
+        return arg();
+      }).then(function () {
+        pendingSyncOps = Math.max(0, pendingSyncOps - 1);
+        if (pendingSyncOps === 0 && !hasPendingOutbox(userId) && isCloudActive() && authState.user && authState.user.id === userId) {
+          authState.syncState = 'synced';
+          authState.lastSyncError = null;
+          authState.lastSyncedAt = new Date().toISOString();
+          notifyListeners('sync');
+        }
+      }).catch(function (err) {
+        pendingSyncOps = Math.max(0, pendingSyncOps - 1);
+        if (isCloudActive() && authState.user && authState.user.id === userId) {
+          authState.syncState = 'error';
+          authState.lastSyncError = err && err.message ? err.message : 'Cloud sync error';
+          notifyListeners('sync');
+        }
+      });
+      return syncChain;
+    }
+    return queueCloudOps(arg);
   }
 
   function pushUndoSnapshot(label) {
@@ -1075,30 +1421,37 @@
     notifyListeners('authStatus');
   }
 
-  function setCloudWorkspace(userObj, workspaceData) {
+  function setCloudWorkspace(userObj, workspaceData, options) {
     var normUser = normalizeUser(userObj);
     if (!normUser) return;
 
+    var opts = options && typeof options === 'object' ? options : {};
     var prevTheme = state.theme;
     var prevView = state.activeView;
+    var prevDate = state.selectedDate;
+    var prevFilters = state.filters;
     var cacheKey = CLOUD_CACHE_PREFIX + normUser.id;
     var cached = readStorageKey(cacheKey);
     var ws = workspaceData && typeof workspaceData === 'object' ? workspaceData : (cached || {});
+    var wsSettings = ws.settings || (cached && cached.settings) || defaultSettings();
+    var resolvedTheme = (wsSettings && (wsSettings.theme === 'dark' || wsSettings.theme === 'light'))
+      ? wsSettings.theme
+      : (prevTheme || (cached && cached.theme) || 'light');
 
     currentStorageKey = cacheKey;
     undoStack = [];
-    pendingSyncOps = 0;
+    clearOutboxRetry();
 
     var clean = sanitizeFullState({
       version: 1,
-      selectedDate: (cached && cached.selectedDate) || todayKey(),
-      activeView: prevView || (cached && cached.activeView) || 'today',
-      theme: prevTheme || (cached && cached.theme) || 'light',
-      settings: ws.settings || (cached && cached.settings) || defaultSettings(),
+      selectedDate: opts.preserveUi ? prevDate : ((cached && cached.selectedDate) || todayKey()),
+      activeView: opts.preserveUi ? prevView : (prevView || (cached && cached.activeView) || 'today'),
+      theme: resolvedTheme,
+      settings: wsSettings,
       tasks: Array.isArray(ws.tasks) ? ws.tasks : ((cached && cached.tasks) || []),
       routines: Array.isArray(ws.routines) ? ws.routines : ((cached && cached.routines) || []),
       reflections: ws.reflections || (cached && cached.reflections) || {},
-      filters: (cached && cached.filters) || defaultFilters(),
+      filters: opts.preserveUi ? prevFilters : ((cached && cached.filters) || defaultFilters()),
       isSampleData: false
     });
 
@@ -1106,12 +1459,103 @@
     authState.mode = 'cloud';
     authState.authenticated = true;
     authState.user = normUser;
-    authState.syncState = 'synced';
-    authState.lastSyncError = null;
-    authState.lastSyncedAt = new Date().toISOString();
 
+    var outboxLen = loadOutbox(normUser.id).length;
+    pendingSyncOps = outboxLen;
+    if (outboxLen > 0) {
+      authState.syncState = 'syncing';
+      authState.lastSyncError = null;
+    } else {
+      authState.syncState = 'synced';
+      authState.lastSyncError = null;
+      authState.lastSyncedAt = new Date().toISOString();
+    }
+
+    saveThemeKey(state.theme);
     saveToStorage(currentStorageKey, state);
-    notifyListeners('authSwitch');
+    notifyListeners(opts.reason || 'authSwitch');
+  }
+
+  function flushCloudOutboxForUser(userObj) {
+    var normUser = normalizeUser(userObj);
+    if (!normUser) return Promise.resolve({ ok: false });
+    if (!hasPendingOutbox(normUser.id)) {
+      return Promise.resolve({ ok: true, flushed: 0 });
+    }
+    var count = loadOutbox(normUser.id).length;
+    setCloudWorkspace(normUser, null, { reason: 'authSwitch' });
+    return pumpOutbox(normUser.id).then(function (res) {
+      return Object.assign({ flushed: count }, res || {});
+    });
+  }
+
+  function refreshWorkspaceFromCloud(options) {
+    if (!isCloudActive() || typeof global.fetch !== 'function') {
+      return Promise.resolve({ ok: false, skipped: true });
+    }
+    var userId = authState.user.id;
+    if (hasPendingOutbox(userId) || activePumpPromise) {
+      return pumpOutbox(userId).then(function () {
+        return { ok: true, flushedFirst: true };
+      });
+    }
+    if (activeRefreshPromise) return activeRefreshPromise;
+
+    var opts = options && typeof options === 'object' ? options : {};
+    var promise = apiRequest('/api/workspace', 'GET').then(function (ws) {
+      if (!isCloudActive() || !authState.user || authState.user.id !== userId) {
+        return { ok: false, switched: true };
+      }
+      if (hasPendingOutbox(userId) || activePumpPromise) {
+        return { ok: true, deferredToLocalWrite: true };
+      }
+      if (!ws || !ws.user) {
+        return { ok: false };
+      }
+
+      var prevSig = persistSyncEnvelope(authState.user, state);
+      var cleanServerWs = sanitizeFullState({
+        version: 1,
+        selectedDate: state.selectedDate,
+        activeView: state.activeView,
+        theme: (ws.settings && (ws.settings.theme === 'dark' || ws.settings.theme === 'light'))
+          ? ws.settings.theme
+          : state.theme,
+        settings: ws.settings || state.settings,
+        tasks: Array.isArray(ws.tasks) ? ws.tasks : [],
+        routines: Array.isArray(ws.routines) ? ws.routines : [],
+        reflections: ws.reflections || {},
+        filters: state.filters,
+        isSampleData: false
+      });
+      var normServerUser = normalizeUser(ws.user) || authState.user;
+      var nextSig = persistSyncEnvelope(normServerUser, cleanServerWs);
+
+      if (prevSig === nextSig && cleanServerWs.theme === state.theme) {
+        authState.lastSyncedAt = new Date().toISOString();
+        if (authState.syncState !== 'synced') {
+          authState.syncState = 'synced';
+          authState.lastSyncError = null;
+          notifyListeners('sync');
+        }
+        return { ok: true, changed: false };
+      }
+
+      setCloudWorkspace(normServerUser, ws, {
+        preserveUi: true,
+        reason: opts.silent ? 'workspaceSync' : 'workspaceSync'
+      });
+      return { ok: true, changed: true };
+    }).catch(function (err) {
+      return { ok: false, error: err && err.message ? err.message : 'Refresh failed' };
+    }).finally(function () {
+      if (activeRefreshPromise === promise) {
+        activeRefreshPromise = null;
+      }
+    });
+
+    activeRefreshPromise = promise;
+    return promise;
   }
 
   function setGuestMode() {
@@ -1121,6 +1565,7 @@
     currentStorageKey = GUEST_STORAGE_KEY;
     undoStack = [];
     pendingSyncOps = 0;
+    clearOutboxRetry();
 
     var guestState = loadInitialGuestState();
     if (VALID_THEMES.indexOf(prevTheme) !== -1) guestState.theme = prevTheme;
@@ -1134,6 +1579,7 @@
     authState.lastSyncError = null;
     authState.lastSyncedAt = null;
 
+    saveThemeKey(state.theme);
     saveToStorage(currentStorageKey, state);
     notifyListeners('authSwitch');
   }
@@ -1181,10 +1627,11 @@
       tasks: guest.tasks,
       routines: guest.routines,
       reflections: guest.reflections,
-      settings: guest.settings
+      settings: Object.assign({}, guest.settings, { theme: state.theme })
     }).then(function () {
       return apiRequest('/api/workspace', 'GET');
     }).then(function (ws) {
+      saveOutbox(authState.user.id, []);
       if (ws && ws.user) {
         setCloudWorkspace(ws.user, ws);
       } else {
@@ -1225,6 +1672,7 @@
   function setTheme(theme) {
     if (VALID_THEMES.indexOf(theme) === -1 || state.theme === theme) return;
     state.theme = theme;
+    saveThemeKey(theme);
     commit('theme');
     if (currentStorageKey !== GUEST_STORAGE_KEY) {
       var guestRaw = readStorageKey(GUEST_STORAGE_KEY);
@@ -1233,6 +1681,13 @@
         saveToStorage(GUEST_STORAGE_KEY, guestRaw);
       }
     }
+    if (isCloudActive()) {
+      queueCloudOps({
+        path: '/api/settings',
+        method: 'PUT',
+        body: buildSettingsPayload(theme)
+      });
+    }
   }
 
   function updateSettings(partial) {
@@ -1240,14 +1695,10 @@
     state.settings = normalizeSettings(Object.assign({}, state.settings, partial));
     commit('settings');
     if (isCloudActive()) {
-      var u = authState.user;
-      queueCloudOp(function () {
-        return apiRequest('/api/settings', 'PUT', Object.assign({}, state.settings, {
-          timezone: u.timezone,
-          telegramNotificationsEnabled: u.telegramNotificationsEnabled,
-          morningReminderHour: u.morningReminderHour,
-          eveningReminderHour: u.eveningReminderHour
-        }));
+      queueCloudOps({
+        path: '/api/settings',
+        method: 'PUT',
+        body: buildSettingsPayload()
       });
     }
   }
@@ -1384,8 +1835,10 @@
     if (moved > 0) {
       commit('rollover');
       if (isCloudActive()) {
-        queueCloudOp(function () {
-          return apiRequest('/api/tasks/batch', 'POST', { action: 'upsertMany', tasks: movedTasks });
+        queueCloudOps({
+          path: '/api/tasks/batch',
+          method: 'POST',
+          body: { action: 'upsertMany', tasks: movedTasks }
         });
       }
     }
@@ -1402,8 +1855,10 @@
     state.tasks = state.tasks.concat([task]);
     commit('addTask');
     if (isCloudActive()) {
-      queueCloudOp(function () {
-        return apiRequest('/api/tasks', 'POST', task);
+      queueCloudOps({
+        path: '/api/tasks',
+        method: 'POST',
+        body: task
       });
     }
     return task;
@@ -1418,8 +1873,10 @@
 
   function syncTaskPatch(taskObj) {
     if (!isCloudActive() || !taskObj) return;
-    queueCloudOp(function () {
-      return apiRequest('/api/tasks/' + encodeURIComponent(taskObj.id), 'PATCH', {
+    queueCloudOps({
+      path: '/api/tasks/' + encodeURIComponent(taskObj.id),
+      method: 'PATCH',
+      body: {
         title: taskObj.title,
         notes: taskObj.notes,
         date: taskObj.date,
@@ -1434,7 +1891,7 @@
         routineId: taskObj.routineId,
         order: taskObj.order,
         completedAt: taskObj.completedAt
-      });
+      }
     });
   }
 
@@ -1482,8 +1939,9 @@
     state.tasks = state.tasks.filter(function (t) { return t.id !== id; });
     commit('deleteTask');
     if (isCloudActive()) {
-      queueCloudOp(function () {
-        return apiRequest('/api/tasks/' + encodeURIComponent(id), 'DELETE');
+      queueCloudOps({
+        path: '/api/tasks/' + encodeURIComponent(id),
+        method: 'DELETE'
       });
     }
     return removed;
@@ -1519,11 +1977,10 @@
       var dayUpdates = getTasksForDate(orig.date).map(function (t) {
         return { id: t.id, order: t.order, timeBlock: t.timeBlock, date: t.date };
       });
-      queueCloudOp(function () {
-        return apiRequest('/api/tasks', 'POST', copy).then(function () {
-          return apiRequest('/api/tasks/batch', 'POST', { action: 'reorder', updates: dayUpdates });
-        });
-      });
+      queueCloudOps([
+        { path: '/api/tasks', method: 'POST', body: copy },
+        { path: '/api/tasks/batch', method: 'POST', body: { action: 'reorder', updates: dayUpdates } }
+      ]);
     }
     return copy;
   }
@@ -1588,8 +2045,10 @@
 
     commit('reorderTask');
     if (isCloudActive()) {
-      queueCloudOp(function () {
-        return apiRequest('/api/tasks/batch', 'POST', { action: 'reorder', updates: updates });
+      queueCloudOps({
+        path: '/api/tasks/batch',
+        method: 'POST',
+        body: { action: 'reorder', updates: updates }
       });
     }
     return true;
@@ -1636,8 +2095,10 @@
       var updates = getTasksForDate(task.date).map(function (t) {
         return { id: t.id, order: t.order, timeBlock: t.timeBlock, date: t.date };
       });
-      queueCloudOp(function () {
-        return apiRequest('/api/tasks/batch', 'POST', { action: 'reorder', updates: updates });
+      queueCloudOps({
+        path: '/api/tasks/batch',
+        method: 'POST',
+        body: { action: 'reorder', updates: updates }
       });
     }
     return true;
@@ -1711,9 +2172,7 @@
     state.routines = state.routines.concat([routine]);
     commit('addRoutine');
     if (isCloudActive()) {
-      queueCloudOp(function () {
-        return apiRequest('/api/routines', 'POST', routine);
-      });
+      queueCloudOps({ path: '/api/routines', method: 'POST', body: routine });
     }
     return routine;
   }
@@ -1731,8 +2190,10 @@
     if (found) {
       commit('updateRoutine');
       if (isCloudActive()) {
-        queueCloudOp(function () {
-          return apiRequest('/api/routines/' + encodeURIComponent(id), 'PATCH', found);
+        queueCloudOps({
+          path: '/api/routines/' + encodeURIComponent(id),
+          method: 'PATCH',
+          body: found
         });
       }
     }
@@ -1752,8 +2213,9 @@
     state.routines = state.routines.filter(function (r) { return r.id !== id; });
     commit('deleteRoutine');
     if (isCloudActive()) {
-      queueCloudOp(function () {
-        return apiRequest('/api/routines/' + encodeURIComponent(id), 'DELETE');
+      queueCloudOps({
+        path: '/api/routines/' + encodeURIComponent(id),
+        method: 'DELETE'
       });
     }
     return true;
@@ -1806,8 +2268,10 @@
       state.tasks = state.tasks.concat(created);
       commit('applyRoutines');
       if (isCloudActive()) {
-        queueCloudOp(function () {
-          return apiRequest('/api/tasks/batch', 'POST', { action: 'upsertMany', tasks: created });
+        queueCloudOps({
+          path: '/api/tasks/batch',
+          method: 'POST',
+          body: { action: 'upsertMany', tasks: created }
         });
       }
     }
@@ -1859,12 +2323,14 @@
     state.reflections = nextReflections;
     commit('saveReflection');
     if (isCloudActive()) {
-      queueCloudOp(function () {
-        return apiRequest('/api/reflections/' + encodeURIComponent(target), 'PUT', {
+      queueCloudOps({
+        path: '/api/reflections/' + encodeURIComponent(target),
+        method: 'PUT',
+        body: {
           mood: next.mood,
           intention: next.intention,
           reflection: next.reflection
-        });
+        }
       });
     }
     return next;
@@ -1900,44 +2366,17 @@
 
   function syncFullSnapshotToCloud() {
     if (!isCloudActive()) return;
-    var opUserId = authState.user.id;
-    var payload = {
-      mode: 'replace',
-      tasks: state.tasks,
-      routines: state.routines,
-      reflections: state.reflections,
-      settings: state.settings
-    };
-    queueCloudOp(function () {
-      return apiRequest('/api/workspace/import', 'POST', payload).then(function (res) {
-        if (
-          res &&
-          res.workspace &&
-          isCloudActive() &&
-          authState.user &&
-          authState.user.id === opUserId &&
-          pendingSyncOps <= 1
-        ) {
-          var reconciled = sanitizeFullState({
-            version: 1,
-            selectedDate: state.selectedDate,
-            activeView: state.activeView,
-            theme: state.theme,
-            settings: res.workspace.settings || state.settings,
-            tasks: Array.isArray(res.workspace.tasks) ? res.workspace.tasks : state.tasks,
-            routines: Array.isArray(res.workspace.routines) ? res.workspace.routines : state.routines,
-            reflections: res.workspace.reflections || state.reflections,
-            filters: state.filters,
-            isSampleData: false
-          });
-          state.tasks = reconciled.tasks;
-          state.routines = reconciled.routines;
-          state.reflections = reconciled.reflections;
-          state.settings = reconciled.settings;
-          state.isSampleData = false;
-          commit('workspaceSync');
-        }
-      });
+    queueCloudOps({
+      path: '/api/workspace/import',
+      method: 'POST',
+      kind: 'replaceWorkspace',
+      body: {
+        mode: 'replace',
+        tasks: state.tasks,
+        routines: state.routines,
+        reflections: state.reflections,
+        settings: buildSettingsPayload()
+      }
     });
   }
 
@@ -2000,8 +2439,10 @@
     });
     commit('clearCompleted');
     if (isCloudActive()) {
-      queueCloudOp(function () {
-        return apiRequest('/api/tasks/batch', 'POST', { action: 'deleteMany', ids: removedIds });
+      queueCloudOps({
+        path: '/api/tasks/batch',
+        method: 'POST',
+        body: { action: 'deleteMany', ids: removedIds }
       });
     }
     return removedIds.length;
@@ -2433,6 +2874,9 @@
     bootstrap: bootstrap,
     initAuthSession: initAuthSession,
     setCloudWorkspace: setCloudWorkspace,
+    flushCloudOutboxForUser: flushCloudOutboxForUser,
+    refreshWorkspaceFromCloud: refreshWorkspaceFromCloud,
+    getPendingOutboxCount: getPendingOutboxCount,
     setGuestMode: setGuestMode,
     updateUserProfile: updateUserProfile,
     getAuthState: getAuthState,

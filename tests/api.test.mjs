@@ -494,6 +494,7 @@ describe('Strict Two-User Cabinet Isolation & CRUD (WHERE user_id = ?)', () => {
       body: {
         dailyGoalTasks: 7,
         dailyGoalMinutes: 180,
+        theme: 'dark',
         timezone: 'Europe/London',
         telegramNotificationsEnabled: false,
         morningReminderHour: 0,
@@ -502,10 +503,15 @@ describe('Strict Two-User Cabinet Isolation & CRUD (WHERE user_id = ?)', () => {
     });
     assert.equal(res.status, 200);
     assert.equal(res.data.settings.dailyGoalTasks, 7);
+    assert.equal(res.data.settings.theme, 'dark');
     assert.equal(res.data.user.timezone, 'Europe/London');
     assert.equal(res.data.user.telegramNotificationsEnabled, false);
     assert.equal(res.data.user.morningReminderHour, 0);
     assert.equal(res.data.user.eveningReminderHour, 22);
+
+    const wsAfter = await call(env, 'GET', '/api/workspace', { headers: { Cookie: cookieA } });
+    assert.equal(wsAfter.status, 200);
+    assert.equal(wsAfter.data.settings.theme, 'dark');
   });
 });
 

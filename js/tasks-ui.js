@@ -1117,7 +1117,40 @@
     }
   }
 
+  var notesTimer = null;
+  var pendingDrawerEdit = null;
+
+  function flushDrawerEdits() {
+    clearTimeout(notesTimer);
+    notesTimer = null;
+    if (!pendingDrawerEdit && uiState.openDrawerId) {
+      var titleEl = document.getElementById('drawer-title');
+      var notesEl = document.getElementById('drawer-notes');
+      var store = getStore();
+      var task = (store.getState().tasks || []).find(function (t) { return t.id === uiState.openDrawerId; });
+      if (task) {
+        var patch = {};
+        if (titleEl && titleEl.value.trim() && titleEl.value.trim() !== task.title) {
+          patch.title = titleEl.value.trim();
+        }
+        if (notesEl && notesEl.value !== (task.notes || '')) {
+          patch.notes = notesEl.value;
+        }
+        if (Object.keys(patch).length > 0) {
+          store.updateTask(task.id, patch);
+        }
+      }
+      return;
+    }
+    if (pendingDrawerEdit) {
+      var edit = pendingDrawerEdit;
+      pendingDrawerEdit = null;
+      getStore().updateTask(edit.id, edit.patch);
+    }
+  }
+
   function closeDrawer() {
+    flushDrawerEdits();
     var drawer = document.getElementById('task-drawer');
     var backdrop = document.getElementById('drawer-backdrop');
     uiState.openDrawerId = null;
@@ -1712,7 +1745,6 @@
         }
       });
 
-      var notesTimer = null;
       drawer.addEventListener('input', function (e) {
         var field = e.target && e.target.getAttribute('data-field');
         if ((field !== 'notes' && field !== 'title') || !uiState.openDrawerId) {
@@ -1720,20 +1752,40 @@
         }
         var id = uiState.openDrawerId;
         var val = e.target.value;
+        var patch = {};
+        if (field === 'title') {
+          var trimmed = val.trim();
+          if (!trimmed) {
+            return;
+          }
+          patch.title = trimmed;
+        } else {
+          patch.notes = val;
+        }
+        pendingDrawerEdit = { id: id, patch: patch };
         clearTimeout(notesTimer);
         notesTimer = setTimeout(function () {
-          var patch = {};
-          if (field === 'title') {
-            var trimmed = val.trim();
-            if (!trimmed) {
-              return;
-            }
-            patch.title = trimmed;
-          } else {
-            patch.notes = val;
+          notesTimer = null;
+          if (pendingDrawerEdit) {
+            var commitEdit = pendingDrawerEdit;
+            pendingDrawerEdit = null;
+            getStore().updateTask(commitEdit.id, commitEdit.patch);
           }
-          getStore().updateTask(id, patch);
         }, 250);
+      });
+
+      drawer.addEventListener('focusout', function (e) {
+        var field = e.target && e.target.getAttribute('data-field');
+        if (field === 'notes' || field === 'title') {
+          flushDrawerEdits();
+        }
+      });
+
+      window.addEventListener('pagehide', flushDrawerEdits);
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'hidden') {
+          flushDrawerEdits();
+        }
       });
     }
   }
